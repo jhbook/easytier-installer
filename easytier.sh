@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.4"
+SCRIPT_VERSION="0.4.6"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -68,6 +68,11 @@ load_settings() {
   WEB_PORT="$DEFAULT_WEB_PORT"
   CONFIG_PORT="$DEFAULT_CONFIG_PORT"
   NODE_PORT="$DEFAULT_NODE_PORT"
+  # Address the Web page uses to reach the local REST API. It is confirmed at
+  # install time and falls back to the detected LAN address, because the bundled
+  # UI otherwise advertises the official config server instead of this device.
+  WEB_API_HOST=""
+  # Legacy key from <= 0.4.4, kept only so old settings files still parse.
   API_HOST=""
   USERNAME="$DEFAULT_USER"
   RUN_MODE="$DEFAULT_MODE"
@@ -79,6 +84,7 @@ load_settings() {
   : "${WEB_PORT:=$DEFAULT_WEB_PORT}"
   : "${CONFIG_PORT:=$DEFAULT_CONFIG_PORT}"
   : "${NODE_PORT:=$DEFAULT_NODE_PORT}"
+  : "${WEB_API_HOST:=}"
   : "${USERNAME:=$DEFAULT_USER}"
   : "${RUN_MODE:=$DEFAULT_MODE}"
   : "${REMOTE_URL:=$DEFAULT_REMOTE_URL}"
@@ -91,7 +97,8 @@ load_settings() {
     valid_port "$CONFIG_PORT" || CONFIG_PORT="$DEFAULT_CONFIG_PORT"
     valid_port "$NODE_PORT" || NODE_PORT="$DEFAULT_NODE_PORT"
   fi
-  if [ -z "${API_HOST:-}" ]; then API_HOST="$(detect_lan_ip)"; fi
+  # A script-guessed address written by <= 0.4.4 must never be reused.
+  API_HOST=""
 }
 shell_quote() {
   # Return a safely single-quoted shell value for the settings file.
@@ -105,7 +112,7 @@ save_settings() {
     printf 'WEB_PORT=%s\n' "$(shell_quote "$WEB_PORT")"
     printf 'CONFIG_PORT=%s\n' "$(shell_quote "$CONFIG_PORT")"
     printf 'NODE_PORT=%s\n' "$(shell_quote "$NODE_PORT")"
-    printf 'API_HOST=%s\n' "$(shell_quote "$API_HOST")"
+    printf 'WEB_API_HOST=%s\n' "$(shell_quote "$WEB_API_HOST")"
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
     printf 'RUN_MODE=%s\n' "$(shell_quote "$RUN_MODE")"
     printf 'REMOTE_URL=%s\n' "$(shell_quote "$REMOTE_URL")"
@@ -419,9 +426,15 @@ EOF
 }
 
 write_runtime_env() {
-  # Used by service scripts. Keep the web API host reachable from other LAN devices.
-  [ -n "${API_HOST:-}" ] || API_HOST="$(detect_lan_ip)"
-  [ -n "${API_HOST:-}" ] || API_HOST="127.0.0.1"
+  # Used by the service scripts. In local Web mode the bundled UI must be told
+  # which absolute address serves its REST API; leaving it empty would make the
+  # UI fall back to the official config server, so an empty value is filled in
+  # from the detected LAN address instead.
+  if [ "$RUN_MODE" = "local-web" ] && [ -z "${WEB_API_HOST:-}" ]; then
+    WEB_API_HOST="$(detect_lan_ip)"
+    [ -n "$WEB_API_HOST" ] || WEB_API_HOST="127.0.0.1"
+  fi
+  : "${WEB_API_HOST:=}"
   env_tmp="$CONF/runtime.env.tmp.$$"
   umask 077
   {
@@ -435,7 +448,7 @@ write_runtime_env() {
     printf 'WEB_PORT=%s\n' "$(shell_quote "$WEB_PORT")"
     printf 'CONFIG_PORT=%s\n' "$(shell_quote "$CONFIG_PORT")"
     printf 'NODE_PORT=%s\n' "$(shell_quote "$NODE_PORT")"
-    printf 'API_HOST=%s\n' "$(shell_quote "$API_HOST")"
+    printf 'WEB_API_HOST=%s\n' "$(shell_quote "$WEB_API_HOST")"
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
   } > "$env_tmp" || { rm -f "$env_tmp"; die "写入运行环境文件失败。"; }
   chmod 600 "$env_tmp" 2>/dev/null || :
@@ -465,16 +478,23 @@ EOF
 }
 
 write_openwrt() {
-  cat > /etc/init.d/easytier <<'EOF'
+  # Only watch the files that belong to the current mode, so a leftover file
+  # from the previous mode can never make procd reload stale state.
+  case "$RUN_MODE" in
+    local-web) procd_files="$CONF/runtime.env $DATA/core.args" ;;
+    config-file) procd_files="$CONF/runtime.env $DATA/config.toml" ;;
+    *) procd_files="$CONF/runtime.env" ;;
+  esac
+  cat > /etc/init.d/easytier <<EOF
 #!/bin/sh /etc/rc.common
 USE_PROCD=1
 START=95
 STOP=10
 start_service() {
   procd_open_instance
-  procd_set_param command /etc/easytier-installer/run.sh
+  procd_set_param command $CONF/run.sh
   procd_set_param respawn 3600 5 5
-  procd_set_param file /etc/easytier-installer/runtime.env /opt/easytier/data/core.args /opt/easytier/data/config.toml
+  procd_set_param file $procd_files
   procd_close_instance
 }
 EOF
@@ -532,11 +552,43 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
+port_open() {
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"
+  else
+    return 0
+  fi
+}
 case "$RUN_MODE" in
   local-web)
-    "$WEB" --api-server-addr 0.0.0.0 --web-server-addr 0.0.0.0 --api-server-port "$WEB_PORT" --api-host "http://${API_HOST}:${WEB_PORT}" --config-server-port "$CONFIG_PORT" --config-server-protocol udp &
+    # --api-host tells the bundled Web UI which absolute address its REST API
+    # is served from. It must be passed: without it the UI falls back to the
+    # official config server (https://config-server.easytier.cn), which makes a
+    # local installation unusable. The value has to be the address the browser
+    # uses to open the page, so it is confirmed with the user at install time
+    # and verified over HTTP right after the service starts.
+    set -- --api-server-addr 0.0.0.0 --web-server-addr 0.0.0.0 \
+      --api-server-port "$WEB_PORT" \
+      --config-server-port "$CONFIG_PORT" --config-server-protocol udp
+    if [ -n "${WEB_API_HOST:-}" ]; then
+      set -- "$@" --api-host "http://${WEB_API_HOST}:${WEB_PORT}"
+    fi
+    "$WEB" "$@" &
     WEB_PID=$!
-    sleep 2
+    # Wait until the Web/API port really listens before starting the core.
+    i=0
+    while [ "$i" -lt 20 ]; do
+      kill -0 "$WEB_PID" 2>/dev/null || { echo "Web 管理端进程已退出（$WEB）。" >&2; exit 1; }
+      port_open "$WEB_PORT" && break
+      i=$((i+1))
+      sleep 1
+    done
+    if ! port_open "$WEB_PORT"; then
+      echo "Web 管理端未在 ${WEB_PORT}/tcp 上监听。" >&2
+      exit 1
+    fi
     "$CORE" --config-server "udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}" --listeners "$NODE_PORT" &
     CORE_PID=$!
     ;;
@@ -552,6 +604,15 @@ case "$RUN_MODE" in
     ;;
   *) echo "未知运行模式：$RUN_MODE" >&2; exit 1 ;;
 esac
+# Supervise both processes: if either dies, exit so the service manager can
+# restart the whole stack instead of leaving a half-working installation.
+while kill -0 "$CORE_PID" 2>/dev/null; do
+  if [ -n "$WEB_PID" ] && ! kill -0 "$WEB_PID" 2>/dev/null; then
+    echo "Web 管理端进程意外退出。" >&2
+    exit 1
+  fi
+  sleep 5
+done
 wait "$CORE_PID"
 rc=$?
 cleanup
@@ -580,6 +641,149 @@ service_is_active() {
     *) return 1 ;;
   esac
 }
+addr_is_local() {
+  # True when $1 is an address this host really owns, so a browser on the same
+  # network can be expected to reach the Web page through it.
+  case "$1" in 127.0.0.1|localhost|0.0.0.0) return 0 ;; esac
+  have ip || return 0
+  ip -o -4 addr show 2>/dev/null | grep -q "[[:space:]]$1/"
+}
+verify_web_http() {
+  # Ask the running Web server for its own page and for the API address it
+  # advertises. A page that loads while advertising another host is exactly the
+  # failure users report as "installed successfully but the page does not open",
+  # so both checks must pass before the installation is called successful.
+  [ "$RUN_MODE" = "local-web" ] || return 0
+  port_is_listening "$WEB_PORT" tcp || return 1
+  if ! have curl; then
+    say "（未检测到 curl，跳过 Web 页面 HTTP 自检）"
+    return 0
+  fi
+  vh_host="$WEB_API_HOST"
+  [ -n "$vh_host" ] || vh_host="127.0.0.1"
+  vh_code="$(curl -s -o /dev/null -w '%{http_code}' -m 8 "http://${vh_host}:${WEB_PORT}/" 2>/dev/null)" || vh_code=000
+  case "$vh_code" in
+    2*|3*) ;;
+    *) warn "Web 页面自检失败：http://${vh_host}:${WEB_PORT}/ 返回 HTTP ${vh_code}。"; return 1 ;;
+  esac
+  vh_meta="$(curl -s -m 8 "http://127.0.0.1:${WEB_PORT}/api_meta.js" 2>/dev/null || :)"
+  case "$vh_meta" in
+    *"$WEB_API_HOST"*) ;;
+    *)
+      warn "Web 页面自检失败：页面公布的 API 地址与本次配置不一致。"
+      say "  本次配置的访问地址：$WEB_API_HOST"
+      say "  页面实际公布的内容：$vh_meta"
+      return 1
+      ;;
+  esac
+  return 0
+}
+port_is_listening() {
+  # $1 = port, $2 = tcp|udp. True when something already listens on it.
+  pl_port="$1"; pl_kind="${2:-tcp}"
+  if have netstat; then
+    if [ "$pl_kind" = udp ]; then netstat -lnu 2>/dev/null; else netstat -ltn 2>/dev/null; fi | grep -qE "[:.]${pl_port}[[:space:]]"
+  elif have ss; then
+    if [ "$pl_kind" = udp ]; then ss -lnu 2>/dev/null; else ss -ltn 2>/dev/null; fi | grep -qE "[:.]${pl_port}[[:space:]]"
+  else
+    return 1
+  fi
+}
+stack_running() {
+  if have pidof; then
+    pidof easytier-core >/dev/null 2>&1 && return 0
+    pidof easytier-web-embed >/dev/null 2>&1 && return 0
+  fi
+  if have pgrep; then
+    pgrep -f "$CONF/run.sh" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+kill_leftover_stack() {
+  # Guarantee the previous mode is gone before the new definition starts, so
+  # an old process can neither hold a port nor keep serving stale arguments.
+  if have pidof; then
+    for n in easytier-core easytier-web-embed; do
+      pids="$(pidof "$n" 2>/dev/null || :)"
+      [ -n "$pids" ] && kill $pids 2>/dev/null || :
+    done
+  fi
+  if have pgrep; then
+    for p in $(pgrep -f "$CONF/run.sh" 2>/dev/null || :); do kill "$p" 2>/dev/null || :; done
+  fi
+  i=0
+  while [ "$i" -lt 6 ]; do
+    stack_running || return 0
+    i=$((i+1))
+    sleep 1
+  done
+  warn "旧实例未能在 6 秒内退出，正在强制结束。"
+  if have pidof; then
+    for n in easytier-core easytier-web-embed; do
+      pids="$(pidof "$n" 2>/dev/null || :)"
+      [ -n "$pids" ] && kill -9 $pids 2>/dev/null || :
+    done
+  fi
+  if have pgrep; then
+    for p in $(pgrep -f "$CONF/run.sh" 2>/dev/null || :); do kill -9 "$p" 2>/dev/null || :; done
+  fi
+  sleep 1
+  return 0
+}
+wait_service_up() {
+  # Poll the real state: process alive and, for local Web, port listening.
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if service_is_active; then
+      case "$RUN_MODE" in
+        local-web) port_is_listening "$WEB_PORT" tcp && return 0 ;;
+        *) return 0 ;;
+      esac
+    fi
+    i=$((i+1))
+    sleep 1
+  done
+  return 1
+}
+dump_service_logs() {
+  warn "服务未能在预期时间内正常运行，以下为诊断信息："
+  say "运行模式：${RUN_MODE:-未设置}"
+  for f in "$CORE" "$WEB" "$CONF/run.sh"; do
+    if [ -e "$f" ]; then
+      say "  $f：存在，$(wc -c < "$f" 2>/dev/null || echo '?') 字节$([ -x "$f" ] || echo '（不可执行）')"
+    else
+      say "  $f：缺失"
+    fi
+  done
+  if have netstat; then
+    say "--- 端口监听状态（Web $WEB_PORT/tcp，配置服务器 $CONFIG_PORT/udp）---"
+    netstat -ltn 2>/dev/null | grep -E "[:.]${WEB_PORT}[[:space:]]" || say "  TCP ${WEB_PORT}：未监听"
+    netstat -lnu 2>/dev/null | grep -E "[:.]${CONFIG_PORT}[[:space:]]" || say "  UDP ${CONFIG_PORT}：未监听"
+  fi
+  if have logread; then logread 2>/dev/null | grep -i easytier | tail -n 15; fi
+  if have journalctl; then journalctl -u easytier.service -n 15 --no-pager 2>/dev/null; fi
+  for f in "$DATA"/*.log /var/log/easytier*.log; do
+    if [ -f "$f" ]; then say "--- $f ---"; tail -n 15 "$f"; fi
+  done
+  # Run the wrapper once and capture exactly what it says, so the failure is
+  # visible even on systems without logread, journalctl or timeout.
+  if [ -x "$CONF/run.sh" ]; then
+    say "--- 直接运行 $CONF/run.sh 的输出（最多 8 秒）---"
+    dl_out="/tmp/.easytier-run.$$"
+    "$CONF/run.sh" > "$dl_out" 2>&1 &
+    dl_pid=$!
+    dl_i=0
+    while [ "$dl_i" -lt 8 ]; do
+      kill -0 "$dl_pid" 2>/dev/null || break
+      dl_i=$((dl_i+1))
+      sleep 1
+    done
+    kill "$dl_pid" 2>/dev/null || :
+    kill_leftover_stack
+    if [ -s "$dl_out" ]; then tail -n 20 "$dl_out"; else say "  （无输出）"; fi
+    rm -f "$dl_out"
+  fi
+}
 install_service() {
   start_now="${1:-yes}"
   write_runtime_env
@@ -590,7 +794,7 @@ install_service() {
     systemd) write_systemd ;;
     openrc) write_openrc ;;
     sysv) write_sysv ;;
-    *) warn "未识别到受支持的 init 系统。已写入运行脚本：$CONF/run.sh"; return ;;
+    *) warn "未识别到受支持的 init 系统。已写入运行脚本：$CONF/run.sh"; return 1 ;;
   esac
   if [ "$start_now" != yes ]; then
     case "$os" in
@@ -599,12 +803,46 @@ install_service() {
       openrc) rc-service easytier stop >/dev/null 2>&1 || :; rc-update del easytier default >/dev/null 2>&1 || : ;;
       sysv) /etc/init.d/easytier stop >/dev/null 2>&1 || :; if have update-rc.d; then update-rc.d -f easytier remove >/dev/null 2>&1 || :; fi ;;
     esac
+    kill_leftover_stack
     return 0
   fi
   validate_start_config || return 1
-  if [ "$os" = systemd ]; then systemctl restart easytier.service >/dev/null 2>&1 || systemctl start easytier.service >/dev/null 2>&1 || :
-  elif [ "$os" = openwrt ] || [ "$os" = openrc ] || [ "$os" = sysv ]; then /etc/init.d/easytier restart >/dev/null 2>&1 || /etc/init.d/easytier start >/dev/null 2>&1 || :
+  # Stop the previous instance *before* the new one starts: the old service
+  # definition, the old run.sh and any leftover process would otherwise keep
+  # running with the previous mode's arguments and ports.
+  case "$os" in
+    systemd) systemctl stop easytier.service >/dev/null 2>&1 || : ;;
+    openwrt|openrc|sysv) /etc/init.d/easytier stop >/dev/null 2>&1 || : ;;
+  esac
+  kill_leftover_stack
+  if [ "$RUN_MODE" = "local-web" ]; then
+    if port_is_listening "$WEB_PORT" tcp; then
+      warn "TCP 端口 $WEB_PORT 已被其它程序占用，Web 管理端无法启动。请释放该端口或换一个端口后重试。"
+      return 1
+    fi
+    if port_is_listening "$CONFIG_PORT" udp; then
+      warn "UDP 端口 $CONFIG_PORT 已被其它程序占用，配置服务器无法启动。请释放该端口或换一个端口后重试。"
+      return 1
+    fi
   fi
+  start_rc=0
+  if [ "$os" = systemd ]; then
+    systemctl restart easytier.service >/dev/null 2>&1 || systemctl start easytier.service >/dev/null 2>&1 || start_rc=$?
+  elif [ "$os" = openwrt ] || [ "$os" = openrc ] || [ "$os" = sysv ]; then
+    /etc/init.d/easytier restart >/dev/null 2>&1 || /etc/init.d/easytier start >/dev/null 2>&1 || start_rc=$?
+  fi
+  if wait_service_up; then
+    if verify_web_http; then
+      return 0
+    fi
+    dump_service_logs
+    return 1
+  fi
+  if [ "$start_rc" != 0 ]; then
+    warn "服务管理器启动命令返回失败（退出码 $start_rc）。"
+  fi
+  dump_service_logs
+  return 1
 }
 install_all() {
   need_root
@@ -621,11 +859,10 @@ install_all() {
     3) RUN_MODE="remote-web" ;;
     *) RUN_MODE="config-file" ;;
   esac
-  if [ "$RUN_MODE" = "local-web" ] && [ "$previous_mode" != "local-web" ]; then
-    # Refresh the auto-detected address when switching from a non-Web mode;
-    # the saved value may be the router WAN IP rather than its LAN address.
-    API_HOST="$(detect_lan_ip)"
-    [ -n "$API_HOST" ] || API_HOST="127.0.0.1"
+  # Leaving local Web mode: remove the file that mode owns, so nothing from
+  # the previous mode is left behind for the service manager or the user.
+  if [ "$previous_mode" = "local-web" ] && [ "$RUN_MODE" != "local-web" ]; then
+    rm -f "$DATA/core.args"
   fi
   # The previous mode may have stored ports as 0; normalize after the user
   # chooses local Web, not only while loading the previous mode's settings.
@@ -639,8 +876,16 @@ install_all() {
     valid_port "$WEB_PORT" || die "Web/API 端口无效。"
     printf '配置服务器 UDP 端口 [%s]: ' "$CONFIG_PORT"; read -r x || x=""; [ -n "$x" ] && CONFIG_PORT="$x"
     valid_port "$CONFIG_PORT" || die "配置服务器端口无效。"
-    printf 'Web 页面 API 访问 IP [%s]: ' "$API_HOST"; read -r x || x=""; [ -n "$x" ] && API_HOST="$x"
-    [ -n "$API_HOST" ] || API_HOST="127.0.0.1"
+    api_suggest="$(detect_lan_ip)"
+    [ -n "$api_suggest" ] || api_suggest="127.0.0.1"
+    say "Web 页面通过下面这个地址访问本机 API，它必须是你浏览器打开页面时使用的地址。"
+    printf 'Web API 访问地址 [%s]: ' "${WEB_API_HOST:-$api_suggest}"
+    read -r x || x=""
+    [ -n "$x" ] && WEB_API_HOST="$x"
+    [ -n "$WEB_API_HOST" ] || WEB_API_HOST="$api_suggest"
+    if ! addr_is_local "$WEB_API_HOST"; then
+      warn "地址 $WEB_API_HOST 不是本机接口地址，浏览器可能无法打开 Web 页面。"
+    fi
     printf '本机在 Web 配置服务器中的用户名 [%s]: ' "$USERNAME"; read -r x || x=""; [ -n "$x" ] && USERNAME="$x"
     case "$USERNAME" in *[!A-Za-z0-9_.-]*|'') die "用户名只能包含字母、数字、点、下划线和连字符。";; esac
   elif [ "$RUN_MODE" = "remote-web" ]; then
@@ -655,16 +900,22 @@ install_all() {
   save_settings
   get_asset_and_extract
   make_config
+  install_ok=yes
   if [ "$RUN_MODE" = "config-file" ]; then
-    install_service no
+    install_service no || install_ok=no
   else
-    install_service yes
+    install_service yes || install_ok=no
   fi
   say ""
+  if [ "$install_ok" != yes ]; then
+    warn "安装未完成：EasyTier 服务没有成功运行，请按上面的日志排查后重新安装。"
+    return 1
+  fi
   info "安装流程完成。"
   case "$RUN_MODE" in
     local-web)
-      say "Web 地址：http://${API_HOST}:${WEB_PORT}"
+      say "Web 地址：http://${WEB_API_HOST}:${WEB_PORT}"
+      say "请务必用上面这个地址打开页面；若浏览器以前访问过本设备并缓存了旧地址，请清除该站点数据或用无痕窗口打开。"
       say "配置服务器：udp://0.0.0.0:${CONFIG_PORT}"
       say "核心连接地址：udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}"
       ;;
@@ -719,7 +970,7 @@ edit_ports() {
   say "1. 修改 EasyTier 节点监听端口（当前：$NODE_PORT）"
   say "2. 修改 Web/API 端口（当前：$WEB_PORT）"
   say "3. 修改配置服务器端口（当前：$CONFIG_PORT/UDP）"
-  say "4. 修改 Web API 访问 IP（当前：$API_HOST）"
+  say "4. 修改 Web API 访问地址（当前：${WEB_API_HOST:-未设置}）"
   printf '选择：'; read -r c || c=""
   case "$c" in
     1)
@@ -751,17 +1002,25 @@ edit_ports() {
       fi
       ;;
     4)
-      printf '输入可被浏览器访问的设备 IP/主机名：'; read -r x || x=""
-      [ -n "$x" ] || { warn "不能为空"; return; }
-      API_HOST="$x"
+      api_suggest="$(detect_lan_ip)"
+      [ -n "$api_suggest" ] || api_suggest="127.0.0.1"
+      printf '输入 Web API 访问地址（浏览器打开页面时使用的地址）[%s]: ' "${WEB_API_HOST:-$api_suggest}"
+      read -r x || x=""
+      [ -n "$x" ] && WEB_API_HOST="$x"
+      [ -n "$WEB_API_HOST" ] || WEB_API_HOST="$api_suggest"
+      if ! addr_is_local "$WEB_API_HOST"; then
+        warn "地址 $WEB_API_HOST 不是本机接口地址，浏览器可能无法打开 Web 页面。"
+      fi
       ;;
     *) return ;;
   esac
   save_settings
-  write_runtime_env
-  write_runner
-  install_service
-  info "配置已更新并尝试重启服务。"
+  if install_service; then
+    info "配置已更新并已重启服务。"
+  else
+    warn "配置已保存，但服务未能成功启动，请查看上面的日志。"
+    return 1
+  fi
 }
 
 download_settings() {
@@ -812,7 +1071,13 @@ show_status() {
   if [ "$RUN_MODE" = "local-web" ] && [ -x "$WEB" ]; then
     say "Web/API 端口：$WEB_PORT"
     say "配置服务器端口：$CONFIG_PORT/UDP"
-    say "Web API 地址：http://${API_HOST:-127.0.0.1}:${WEB_PORT}"
+    if [ -n "${WEB_API_HOST:-}" ]; then
+      say "Web API 地址：http://${WEB_API_HOST}:${WEB_PORT}"
+      say "打开页面请使用上面这个地址。"
+    else
+      say "Web API 地址：未设置（服务启动时会使用本机检测到的地址）"
+      say "建议访问：http://$(detect_lan_ip):${WEB_PORT}"
+    fi
   else
     say "Web/API 端口：未配置"
     [ "$RUN_MODE" = "config-file" ] || say "配置服务器端口：未配置"
@@ -910,14 +1175,12 @@ update_all() {
   fi
   info "更新完成。"
 }
-uninstall_all() {
-  need_root
-  printf '确认卸载全部 EasyTier？将删除核心、服务、配置、数据库及 et 管理脚本，此操作不可恢复。[y/N] '
-  read -r answer || answer=""
-  case "$answer" in y|Y|yes|YES) ;; *) info "已取消卸载。"; return 1 ;; esac
-
+remove_service_definition() {
+  # Stop and disable the service, then delete every init definition and boot
+  # link this script may have created (including ones left by another init
+  # system). Shared by the full and the partial uninstall paths, so a removal
+  # never leaves a definition pointing at files that no longer exist.
   os="$(detect_os)"
-  # Stop the service first, then disable its boot entry before deleting init files.
   case "$os" in
     systemd) systemctl stop easytier.service >/dev/null 2>&1 || :; systemctl disable easytier.service >/dev/null 2>&1 || : ;;
     openwrt) /etc/init.d/easytier stop >/dev/null 2>&1 || :; /etc/init.d/easytier disable >/dev/null 2>&1 || : ;;
@@ -928,16 +1191,24 @@ uninstall_all() {
       if have chkconfig; then chkconfig --del easytier >/dev/null 2>&1 || :; fi
       ;;
   esac
-
+  kill_leftover_stack
   # Remove stale boot links as well, including links left by a previous init system.
   rm -f /etc/systemd/system/multi-user.target.wants/easytier.service
   rm -f /etc/rc.d/*easytier* /etc/runlevels/*/easytier
   rm -f /etc/rc*.d/*easytier*
   rm -f /etc/systemd/system/easytier.service /etc/init.d/easytier
   if have systemctl; then systemctl daemon-reload >/dev/null 2>&1 || :; fi
-
-  # Runtime launch files and installed components are not user data; always remove them.
+  # Runtime launch files are regenerated on every install; drop them here so no
+  # stale run.sh can still be executed by hand after a removal.
   rm -f "$CONF/run.sh" "$CONF/runtime.env"
+}
+uninstall_all() {
+  need_root
+  printf '确认卸载全部 EasyTier？将删除核心、服务、配置、数据库及 et 管理脚本，此操作不可恢复。[y/N] '
+  read -r answer || answer=""
+  case "$answer" in y|Y|yes|YES) ;; *) info "已取消卸载。"; return 1 ;; esac
+
+  remove_service_definition
   rm -rf "$BIN"
 
   # Full uninstall: remove all EasyTier data/configuration and the manager itself.
@@ -951,6 +1222,54 @@ uninstall_all() {
   rm -f /usr/bin/et.new.*
   info "EasyTier 核心、服务、配置、数据库及 et 管理脚本已全部卸载。"
   return 0
+}
+uninstall_components() {
+  need_root
+  printf '确认卸载 EasyTier（保留 et 管理脚本）？将删除核心、组件、服务、配置与数据库，此操作不可恢复。[y/N] '
+  read -r answer || answer=""
+  case "$answer" in y|y|yes|YES) ;; *) info "已取消卸载。"; return 1 ;; esac
+
+  # Everything this script installed around the service goes, but the manager
+  # itself stays usable so the user can reinstall without downloading it again.
+  remove_service_definition
+  rm -rf "$BASE" "$CONF"
+  info "EasyTier 核心、组件、服务、配置与数据库已卸载。"
+  say "et 管理脚本已保留：/usr/bin/et"
+  say "需要时运行 et 选择 1 即可重新安装。"
+  return 0
+}
+uninstall_menu() {
+  while :; do
+    load_settings
+    clear 2>/dev/null || :
+    say "=============================================="
+    say "               卸载 EasyTier"
+    say "=============================================="
+    say "核心：$([ -x "$CORE" ] && echo "已安装（$CORE）" || echo 未安装)"
+    say "Web 管理端：$([ -x "$WEB" ] && echo "已安装（$WEB）" || echo 未安装)"
+    say "配置目录：$([ -d "$CONF" ] && echo "$CONF" || echo 无)"
+    say "数据目录：$([ -d "$DATA" ] && echo "$DATA（$(easytier_dir_size)）" || echo 无)"
+    say "----------------------------------------------"
+    say "1. 卸载 EasyTier（保留 et 管理脚本）"
+    say "   删除核心、Web 管理端、服务定义、配置与数据库"
+    say "2. 全部卸载（含 et 管理脚本）"
+    say "   在第 1 项的基础上，同时删除 /usr/bin/et"
+    say "0. 返回主菜单"
+    say "=============================================="
+    printf '请选择 [0-2，默认 0]：'
+    if ! read -r choice; then
+      warn "读取菜单输入失败，返回主菜单。"
+      return 0
+    fi
+    case "$choice" in
+      # Every action runs in a subshell: die inside an action returns here
+      # instead of terminating the interactive manager.
+      1) (uninstall_components); pause ;;
+      2) if (uninstall_all); then return 10; else pause; fi ;;
+      0|"") return 0 ;;
+      *) warn "无效选项：$choice。请输入 0-2 之间的菜单编号。"; pause ;;
+    esac
+  done
 }
 
 edit_local_config() {
@@ -1010,15 +1329,23 @@ menu() {
     say "10. 下载源 / 镜像加速设置"
     say "11. 查看运行状态"
     say "12. 查看日志"
-    say "13. 卸载全部 EasyTier（核心、服务、配置、数据库及 et 管理脚本）"
+    say "13. 卸载 EasyTier（可保留 et 管理脚本）"
     say "0. 退出"
     say "=============================================="
     printf '请输入选项：'
     if ! read -r choice; then
+      # A closed stdin (Ctrl-D, or a pipe that ran out of lines) fails on every
+      # retry, so looping forever would just spam the menu. Give up instead.
+      read_failures=$(( ${read_failures:-0} + 1 ))
+      if [ "$read_failures" -ge 3 ]; then
+        warn "标准输入已关闭，退出菜单。"
+        exit 0
+      fi
       warn "读取菜单输入失败，请检查终端输入后重试；菜单不会因此退出。"
       sleep 1
       continue
     fi
+    read_failures=0
     case "$choice" in
       # Run menu actions that may call die in a subshell: a failed operation
       # returns to this loop instead of terminating the interactive manager.
@@ -1035,7 +1362,12 @@ menu() {
       11) (show_status); pause ;;
       12) (show_logs); pause ;;
       13)
-        if (uninstall_all); then exit 0; else pause; fi
+        (uninstall_menu)
+        # 10 means "the manager itself was uninstalled": leave the program.
+        case "$?" in
+          10) exit 0 ;;
+          *) pause ;;
+        esac
         ;;
       0) exit 0 ;;
       *) warn "无效选项：$choice。请输入 0-13 之间的菜单编号。"; pause ;;
