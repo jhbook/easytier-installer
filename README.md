@@ -221,3 +221,8 @@ logread -e easytier
 3. GitHub 官方 Raw：`https://raw.githubusercontent.com/jhbook/easytier-installer/main/easytier.sh`。
 
 前一个来源下载失败或校验不通过时才会继续尝试下一个来源。 每个下载地址都会追加当前 Unix 时间戳查询参数（`?_=`），尽量避免 CDN 或中间代理返回缓存的旧版本。
+
+## 版本说明（v0.3.4）
+
+- 菜单输入错误时提示有效范围并等待用户确认，然后返回菜单，不会因输入错误直接退出。
+- 菜单读取输入失败时提示后重试，不直接退出管理程序。

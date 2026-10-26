@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.3.3"
+SCRIPT_VERSION="0.3.4"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -1009,8 +1009,9 @@ menu() {
     say "=============================================="
     printf '请输入选项：'
     if ! read -r choice; then
-      warn "无法读取终端输入。请确认当前 SSH/终端支持交互输入；无终端环境不能运行管理菜单。"
-      exit 1
+      warn "读取菜单输入失败，请检查终端输入后重试；菜单不会因此退出。"
+      sleep 1
+      continue
     fi
     case "$choice" in
       1) install_all; pause ;;
@@ -1028,7 +1029,7 @@ menu() {
       13) uninstall_all; pause ;;
       14) uninstall_manager_script ;;
       0) exit 0 ;;
-      *) warn "无效选项"; sleep 1 ;;
+      *) warn "无效选项：$choice。请输入 0-14 之间的菜单编号。"; pause ;;
     esac
   done
 }
