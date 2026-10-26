@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.3.0"
+SCRIPT_VERSION="0.3.2"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -786,7 +786,7 @@ update_script() {
   load_settings
   case "$SCRIPT_REPO" in
     YOUR_GITHUB_USERNAME/*|*/YOUR_EASYTIER_INSTALLER_REPO|""|*YOUR_GITHUB_USERNAME*|*YOUR_EASYTIER_INSTALLER_REPO*)
-      die "请先编辑脚本顶部的 SCRIPT_REPO，将占位符替换为你自己的 GitHub 仓库（格式：用户名/仓库名）。"
+      die "请先检查脚本顶部的 SCRIPT_REPO（格式：用户名/仓库名）。"
       ;;
   esac
   download_tool
@@ -796,37 +796,43 @@ update_script() {
     target="$SCRIPT_INSTALL_PATH"
   else
     target="$0"
-    case "$target" in
-      /*) ;;
-      *) target="$(pwd)/$target" ;;
-    esac
+    case "$target" in /*) ;; *) target="$(pwd)/$target" ;; esac
   fi
   [ -f "$target" ] || die "无法定位当前脚本文件：$target。请先通过下载到文件的方式运行安装脚本。"
   tmp="${target}.new.$$"
-  # Keep this in a dedicated variable: download_file currently uses global
-  # variables named url/out, so passing through it must not overwrite the
-  # official fallback URL in this function (POSIX sh has no portable local).
   official_script_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-  # Self-update uses the same generic mirror configured in menu 10.
-  # Try the mirror first, then fall back to the unmodified official GitHub Raw URL.
+  cdn_script_url="https://cdn.jsdmirror.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
+  # Add a timestamp query to each request to avoid stale CDN/proxy cache entries.
+  cache_bust="$(date +%s 2>/dev/null || echo 0)"
+  cdn_script_url="${cdn_script_url}?_=${cache_bust}"
+  official_script_url="${official_script_url}?_=${cache_bust}"
   rm -f "$tmp"
-  if [ -n "${MIRROR:-}" ]; then
-    mirror_script_url="${MIRROR%/}/${official_script_url}"
-    info "[1/2] 通过配置的 GitHub 镜像更新安装脚本：$mirror_script_url"
-    if download_file "$mirror_script_url" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
-      info "镜像下载完成，脚本身份和语法检查通过。"
-    else
-      warn "镜像下载失败、内容无效或语法检查失败，自动回退 GitHub 官方 Raw 源。"
-      rm -f "$tmp"
-    fi
+
+  # Order: jsDelivr mirror -> configured general GitHub mirror -> official Raw.
+  info "[1/3] 通过 jsDelivr 镜像更新安装脚本：$cdn_script_url"
+  if download_file "$cdn_script_url" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
+    info "jsDelivr 镜像下载完成，脚本身份和语法检查通过。"
   else
-    info "未配置 GitHub 镜像，跳过镜像源。"
+    rm -f "$tmp"
+    if [ -n "${MIRROR:-}" ]; then
+      mirror_script_url="${MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}?_=${cache_bust}"
+      info "[2/3] 通过配置的 GitHub 镜像更新安装脚本：$mirror_script_url"
+      if download_file "$mirror_script_url" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
+        info "配置的镜像下载完成，脚本身份和语法检查通过。"
+      else
+        warn "配置的镜像下载失败或内容无效，自动回退 GitHub 官方 Raw 源。"
+        rm -f "$tmp"
+      fi
+    else
+      info "未配置通用 GitHub 镜像，跳过第二个来源。"
+    fi
   fi
+
   if [ ! -s "$tmp" ]; then
-    info "[2/2] 从 GitHub 官方 Raw 地址更新安装脚本：$official_script_url"
-    if ! download_file "$official_script_url" "$tmp" || ! valid_installer_script "$tmp"; then
+    info "[3/3] 从 GitHub 官方 Raw 地址更新安装脚本：$official_script_url"
+    if ! download_file "$official_script_url" "$tmp" >/dev/null 2>&1 || ! valid_installer_script "$tmp"; then
       rm -f "$tmp"
-      die "安装脚本下载失败或内容无效：镜像源（如已配置）和 GitHub 官方 Raw 均未通过验证。请检查网络、仓库可见性、分支名及文件路径。"
+      die "安装脚本下载失败或内容无效。已依次尝试 jsDelivr、配置的镜像（如已配置）和 GitHub 官方 Raw。"
     fi
     info "GitHub 官方源下载完成，脚本身份和语法检查通过。"
   fi
@@ -834,7 +840,7 @@ update_script() {
   cp -p "$target" "${target}.bak" 2>/dev/null || :
   mv "$tmp" "$target" || { rm -f "$tmp"; die "替换脚本失败；旧脚本仍应保留。"; }
   info "安装管理脚本更新完成。"
-  say "当前脚本版本标记：$SCRIPT_VERSION（新版本将在下次启动时显示）"
+  say "当前运行脚本版本：v$SCRIPT_VERSION；新版本将在下次启动时显示。"
   say "旧脚本备份：${target}.bak"
 }
 
@@ -971,6 +977,7 @@ menu() {
     say "=============================================="
     say "       EasyTier 跨平台安装管理工具"
     say "=============================================="
+    say "脚本版本：v$SCRIPT_VERSION"
     say "系统：$(detect_os)    架构：$(detect_arch)"
     say "模式：$RUN_MODE    核心：$([ -x "$CORE" ] && echo 已安装 || echo 未安装)    Web：$([ -x "$WEB" ] && echo 已安装 || echo 未安装)"
     if [ "$RUN_MODE" = "local-web" ] && [ -x "$WEB" ]; then
@@ -1070,8 +1077,16 @@ if [ "$script_self" != "$SCRIPT_INSTALL_PATH" ]; then
       download_tool
       if [ "$DL_TOOL" != none ]; then
         bootstrap_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-        if [ -n "$DEFAULT_MIRROR" ]; then
-          download_file "${DEFAULT_MIRROR%/}/$bootstrap_url" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
+        bootstrap_cdn_url="https://cdn.jsdmirror.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
+        bootstrap_cache_bust="$(date +%s 2>/dev/null || echo 0)"
+        bootstrap_url="${bootstrap_url}?_=${bootstrap_cache_bust}"
+        bootstrap_cdn_url="${bootstrap_cdn_url}?_=${bootstrap_cache_bust}"
+        # For pipe launches, first fetch a persistent copy from jsDelivr, then
+        # the configured mirror, and finally GitHub Raw. Validate each result.
+        download_file "$bootstrap_cdn_url" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
+        valid_installer_script "$bootstrap_tmp" || rm -f "$bootstrap_tmp"
+        if [ ! -s "$bootstrap_tmp" ] && [ -n "$DEFAULT_MIRROR" ]; then
+          download_file "${DEFAULT_MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}?_=${bootstrap_cache_bust}" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
           valid_installer_script "$bootstrap_tmp" || rm -f "$bootstrap_tmp"
         fi
         if [ ! -s "$bootstrap_tmp" ]; then

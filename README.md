@@ -214,4 +214,10 @@ logread -e easytier
 
 ### 安装脚本自更新失败
 
-菜单 3 会先尝试设置的 GitHub 镜像；镜像失败或下载内容未通过脚本身份与 Shell 语法检查时，应直接回退到 `https://raw.githubusercontent.com/` 官方地址。若日志中回退地址仍带有 `ghfast.top` 等镜像前缀，请更新到修复后的脚本版本。
+菜单会显示当前安装脚本版本号。菜单 3 更新安装脚本时，按以下顺序尝试并在每一步检查脚本身份与 Shell 语法：
+
+1. jsDelivr 镜像：`https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh`
+2. 菜单中配置的通用 GitHub 镜像（如果已配置）。
+3. GitHub 官方 Raw：`https://raw.githubusercontent.com/jhbook/easytier-installer/main/easytier.sh`。
+
+前一个来源下载失败或校验不通过时才会继续尝试下一个来源。 每个下载地址都会追加当前 Unix 时间戳查询参数（`?_=`），尽量避免 CDN 或中间代理返回缓存的旧版本。
