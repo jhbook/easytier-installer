@@ -35,9 +35,12 @@
 ## 快速开始
 
 ```sh
-curl -fsSL "https://github.com/jhbook/easytier-installer/easytier.sh" | sh
+curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/heads/main/easytier.sh" | sh
 ```
-
+国内使用
+```sh
+curl -fsSL "https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh" | sh
+```
 脚本需要网络访问能力。根据下载和安装流程，系统通常需要 `curl` 或 `wget`、`unzip`，以及适合当前系统的服务管理工具。缺少 `unzip` 时脚本会尝试通过系统包管理器安装；如果自动安装失败，需要手动安装。
 
 ## 运行模式怎么选
