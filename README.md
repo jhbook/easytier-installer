@@ -129,7 +129,7 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 默认镜像前缀为：
 
 ```text
-https://ghfast.top/
+https://github.chenc.dev/
 ```
 
 镜像前缀需要能够代理脚本拼接出的完整 GitHub URL。也可以在菜单中选择官方源，清除自定义镜像。不同镜像对 Release 文件和 GitHub API 的支持可能不同，API 测试失败不一定代表 Release 文件下载失败。
