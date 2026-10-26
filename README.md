@@ -41,6 +41,8 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 ```sh
 curl -fsSL "https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
 ```
+首次以 root 启动时，脚本会把管理程序安装到 `/usr/bin/et`，然后从这个固定路径启动菜单。之后可直接输入 `et` 打开管理菜单；菜单中的“更新安装脚本”会更新这份持久化文件，而不是更新 `/tmp` 中的临时副本。也可以手动下载脚本后运行；建议使用 root，以便自动安装到固定路径。
+
 脚本需要网络访问能力。根据下载和安装流程，系统通常需要 `curl` 或 `wget`、`unzip`，以及适合当前系统的服务管理工具。缺少 `unzip` 时脚本会尝试通过系统包管理器安装；如果自动安装失败，需要手动安装。
 
 ## 运行模式怎么选

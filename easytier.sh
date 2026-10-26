@@ -916,14 +916,42 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   cat <<'EOF'
 EasyTier 跨平台安装管理工具
 用法：
+  et                      进入交互菜单
   sh easytier.sh          进入交互菜单
   sh easytier.sh --help   显示帮助
 
 安装时需要 root 权限。核心组件下载顺序：Gitee Release、配置的 GitHub 镜像、GitHub 官方 Release。
-脚本自更新：先编辑脚本顶部的 SCRIPT_REPO、SCRIPT_BRANCH、SCRIPT_PATH，再从菜单选择“从自己的 GitHub 仓库更新安装脚本”。
+管理命令：安装后可直接运行 et。
+脚本自更新：从菜单选择“更新安装脚本”，更新固定路径中的管理脚本。
 安装模式：核心+本地 Web、核心+本地 TOML 配置、核心+远程 Web 控制。低资源设备建议选择后两种。仅本地 Web 模式会安装 easytier-web-embed。
 EOF
   exit 0
+fi
+
+# Persist the management script outside /tmp so menu option 3 can update the
+# actual installed copy instead of replacing a temporary download.
+SCRIPT_INSTALL_PATH="/usr/bin/et"
+script_self="$0"
+case "$script_self" in
+  /*) ;;
+  *) script_self="$(pwd)/$script_self" ;;
+esac
+if [ "$script_self" != "$SCRIPT_INSTALL_PATH" ]; then
+  if is_root && [ -f "$script_self" ] && [ -r "$script_self" ]; then
+    if mkdir -p "$(dirname "$SCRIPT_INSTALL_PATH")" 2>/dev/null; then
+      bootstrap_tmp="${SCRIPT_INSTALL_PATH}.new.$$"
+      if cp "$script_self" "$bootstrap_tmp" 2>/dev/null && sh -n "$bootstrap_tmp" >/dev/null 2>&1 && chmod 755 "$bootstrap_tmp" 2>/dev/null && mv -f "$bootstrap_tmp" "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
+        info "安装管理脚本到：$SCRIPT_INSTALL_PATH"
+        exec "$SCRIPT_INSTALL_PATH" "$@"
+      fi
+      rm -f "$bootstrap_tmp"
+      warn "无法将管理脚本安装到 $SCRIPT_INSTALL_PATH，将继续运行当前副本；菜单中的自更新可能只更新当前文件。"
+    else
+      warn "无法创建脚本安装目录，将继续运行当前副本。"
+    fi
+  elif ! is_root; then
+    warn "建议使用 root 运行，以便将管理脚本安装到 $SCRIPT_INSTALL_PATH；否则自更新不会固定到系统路径。"
+  fi
 fi
 
 menu
