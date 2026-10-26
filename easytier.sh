@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.3.4"
+SCRIPT_VERSION="0.3.5"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -782,15 +782,16 @@ show_logs() {
   fi
 }
 update_script() {
-  need_root
+  if ! is_root; then warn "请使用 root 运行，才能更新 /usr/bin/et。"; return 1; fi
   load_settings
   case "$SCRIPT_REPO" in
     YOUR_GITHUB_USERNAME/*|*/YOUR_EASYTIER_INSTALLER_REPO|""|*YOUR_GITHUB_USERNAME*|*YOUR_EASYTIER_INSTALLER_REPO*)
-      die "请先检查脚本顶部的 SCRIPT_REPO（格式：用户名/仓库名）。"
+      warn "请先检查脚本顶部的 SCRIPT_REPO（格式：用户名/仓库名）。"
+      return 1
       ;;
   esac
   download_tool
-  [ "$DL_TOOL" != none ] || die "缺少 curl/wget，无法更新安装脚本。"
+  if [ "$DL_TOOL" = none ]; then warn "缺少 curl/wget，无法更新安装脚本。"; return 1; fi
   SCRIPT_INSTALL_PATH="/usr/bin/et"
   if [ -f "$SCRIPT_INSTALL_PATH" ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
     target="$SCRIPT_INSTALL_PATH"
@@ -798,7 +799,7 @@ update_script() {
     target="$0"
     case "$target" in /*) ;; *) target="$(pwd)/$target" ;; esac
   fi
-  [ -f "$target" ] || die "无法定位当前脚本文件：$target。请先通过下载到文件的方式运行安装脚本。"
+  if [ ! -f "$target" ]; then warn "无法定位当前脚本文件：$target。请先通过下载到文件的方式运行安装脚本。"; return 1; fi
   tmp="${target}.new.$$"
   official_script_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
   cdn_script_url="https://cdn.jsdmirror.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
@@ -832,20 +833,22 @@ update_script() {
     info "[3/3] 从 GitHub 官方 Raw 地址更新安装脚本：$official_script_url"
     if ! download_file "$official_script_url" "$tmp" >/dev/null 2>&1 || ! valid_installer_script "$tmp"; then
       rm -f "$tmp"
-      die "安装脚本下载失败或内容无效。已依次尝试 jsDelivr、配置的镜像（如已配置）和 GitHub 官方 Raw。"
+      warn "安装脚本下载失败或内容无效。已依次尝试 jsDelivr、配置的镜像（如已配置）和 GitHub 官方 Raw。"
+      return 1
     fi
     info "GitHub 官方源下载完成，脚本身份和语法检查通过。"
   fi
-  chmod 755 "$tmp" || { rm -f "$tmp"; die "无法设置新脚本权限。"; }
+  if ! chmod 755 "$tmp"; then rm -f "$tmp"; warn "无法设置新脚本权限。"; return 1; fi
   cp -p "$target" "${target}.bak" 2>/dev/null || :
-  mv "$tmp" "$target" || { rm -f "$tmp"; die "替换脚本失败；旧脚本仍应保留。"; }
+  if ! mv "$tmp" "$target"; then rm -f "$tmp"; warn "替换脚本失败；旧脚本仍应保留。"; return 1; fi
   info "安装管理脚本更新完成。"
   say "旧脚本备份：${target}.bak"
   say "正在重新启动最新版管理菜单……"
   # Replace this process with the just-updated script so the user immediately
   # lands in the new version's menu instead of continuing in the old process.
   exec "$target" "$@"
-  die "无法启动更新后的管理脚本：$target"
+  warn "无法启动更新后的管理脚本：$target"
+  return 1
 }
 
 update_all() {
@@ -916,7 +919,7 @@ uninstall_all() {
       rm -rf "$BASE" "$CONF"
       if [ -f /usr/bin/et ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' /usr/bin/et 2>/dev/null; then rm -f /usr/bin/et; fi
       info "配置、数据库、管理设置和 et 管理命令已删除。"
-      exit 0
+      return 0
       ;;
     *) info "已保留数据与组网配置：$DATA；Web 端口设置已清除，et 管理命令保留。" ;;
   esac
@@ -1014,19 +1017,21 @@ menu() {
       continue
     fi
     case "$choice" in
-      1) install_all; pause ;;
-      2) update_all; pause ;;
-      3) update_script; pause ;;
-      4) service_action start; pause ;;
-      5) service_action stop; pause ;;
-      6) service_action restart; pause ;;
-      7) edit_ports; pause ;;
-      8) edit_local_config; pause ;;
-      9) set_remote_web; pause ;;
-      10) download_settings; pause ;;
-      11) show_status; pause ;;
-      12) show_logs; pause ;;
-      13) uninstall_all; pause ;;
+      # Run menu actions that may call die in a subshell: a failed operation
+      # returns to this loop instead of terminating the interactive manager.
+      1) (install_all); pause ;;
+      2) (update_all); pause ;;
+      3) update_script; [ "$?" -eq 0 ] || pause ;;
+      4) (service_action start); pause ;;
+      5) (service_action stop); pause ;;
+      6) (service_action restart); pause ;;
+      7) (edit_ports); pause ;;
+      8) (edit_local_config); pause ;;
+      9) (set_remote_web); pause ;;
+      10) (download_settings); pause ;;
+      11) (show_status); pause ;;
+      12) (show_logs); pause ;;
+      13) (uninstall_all); if [ ! -d "$BASE" ]; then exit 0; fi; pause ;;
       14) uninstall_manager_script ;;
       0) exit 0 ;;
       *) warn "无效选项：$choice。请输入 0-14 之间的菜单编号。"; pause ;;
