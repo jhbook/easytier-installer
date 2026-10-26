@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.2"
+SCRIPT_VERSION="0.4.3"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -49,6 +49,16 @@ read() {
   fi
 }
 pause() { printf '\n按回车键继续...'; read -r _dummy || :; }
+# Report the complete EasyTier installation directory footprint, including
+# binaries, configuration, databases and runtime data where stored under BASE.
+easytier_dir_size() {
+  if [ -d "$BASE" ]; then
+    size="$(du -sh "$BASE" 2>/dev/null | awk 'NR == 1 {print $1}')"
+    [ -n "$size" ] && printf '%s' "$size" || printf '未知'
+  else
+    printf '0B（未安装）'
+  fi
+}
 is_root() { [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; }
 valid_port() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null; }
 mkdir_p() { mkdir -p "$1" 2>/dev/null || die "无法创建目录：$1"; }
@@ -958,6 +968,7 @@ menu() {
     say "脚本版本：v$SCRIPT_VERSION"
     say "系统：$(detect_os)    架构：$(detect_arch)"
     say "模式：$RUN_MODE    核心：$([ -x "$CORE" ] && echo 已安装 || echo 未安装)    Web：$([ -x "$WEB" ] && echo 已安装 || echo 未安装)"
+    say "EasyTier 目录占用：$(easytier_dir_size)（$BASE）"
     if [ "$RUN_MODE" = "local-web" ] && [ -x "$WEB" ]; then
       say "Web 端口：$WEB_PORT    配置服务端口：$CONFIG_PORT/UDP"
     else
