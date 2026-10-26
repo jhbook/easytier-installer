@@ -97,7 +97,8 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 | 9 | 设置远程 Web 配置服务器 |
 | 10 | 设置下载源 / 镜像加速 |
 | 11–12 | 查看运行状态、日志 |
-| 13 | 卸载 EasyTier |
+| 13 | 卸载 EasyTier（核心、服务和数据） |
+| 14 | 卸载管理脚本 `et`，保留 EasyTier 核心、服务、配置和数据库 |
 | 0 | 退出 |
 
 在本地 TOML 配置模式下，安装完成后服务会保持停止状态，也不会自动启用开机启动。请先编辑并保存 `config.toml`，再从菜单选择“启动服务”。后续修改配置后，选择“重启服务”使其生效。
@@ -210,3 +211,7 @@ logread -e easytier
 - [EasyTier 官方 GitHub 仓库](https://github.com/EasyTier/EasyTier)
 - [EasyTier 官方文档](https://easytier.cn/)
 - [EasyTier 配置文件文档](https://easytier.cn/guide/network/config-file.html)
+
+### 安装脚本自更新失败
+
+菜单 3 会先尝试设置的 GitHub 镜像；镜像失败或下载内容未通过脚本身份与 Shell 语法检查时，应直接回退到 `https://raw.githubusercontent.com/` 官方地址。若日志中回退地址仍带有 `ghfast.top` 等镜像前缀，请更新到修复后的脚本版本。

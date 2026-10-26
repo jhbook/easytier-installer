@@ -912,6 +912,31 @@ uninstall_all() {
   esac
   info "卸载操作完成。"
 }
+uninstall_manager_script() {
+  need_root
+  script_path="/usr/bin/et"
+  if [ ! -f "$script_path" ] || ! grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$script_path" 2>/dev/null; then
+    warn "未发现已安装的 et 管理脚本；未删除任何文件。"
+    return 1
+  fi
+  printf '仅卸载 et 管理脚本？EasyTier 核心、服务、配置和数据库均保留。[y/N] '
+  read -r answer || answer=""
+  case "$answer" in y|Y|yes|YES) ;; *) info "已取消卸载管理脚本。"; return 0 ;; esac
+
+  if ! rm -f "$script_path"; then
+    warn "删除管理脚本失败：$script_path"
+    return 1
+  fi
+  # Remove only the backup created by this installer's self-updater, and its
+  # interrupted temporary copies. Do not touch EasyTier runtime data/services.
+  if [ -f /usr/bin/et.bak ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' /usr/bin/et.bak 2>/dev/null; then
+    rm -f /usr/bin/et.bak
+  fi
+  rm -f /usr/bin/et.new.*
+  info "et 管理脚本已卸载。EasyTier 核心、服务、配置和数据库均未删除。"
+  exit 0
+}
+
 edit_local_config() {
   need_root
   mkdir_p "$DATA"
@@ -967,7 +992,8 @@ menu() {
     say "10. 下载源 / 镜像加速设置"
     say "11. 查看运行状态"
     say "12. 查看日志"
-    say "13. 卸载 EasyTier"
+    say "13. 卸载 EasyTier（核心、服务和数据）"
+    say "14. 卸载管理脚本 et（保留 EasyTier）"
     say "0. 退出"
     say "=============================================="
     printf '请输入选项：'
@@ -989,6 +1015,7 @@ menu() {
       11) show_status; pause ;;
       12) show_logs; pause ;;
       13) uninstall_all; pause ;;
+      14) uninstall_manager_script ;;
       0) exit 0 ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
