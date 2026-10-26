@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.3.6"
+SCRIPT_VERSION="0.3.7"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -747,9 +747,30 @@ download_settings() {
     download_tool
     [ "$DL_TOOL" != none ] || { warn "缺少 curl/wget"; return; }
     if [ -n "$MIRROR" ]; then
-      fetch_text "${MIRROR%/}/https://api.github.com/repos/$REPO/releases/latest" >/dev/null && info "镜像 API 可访问" || warn "镜像 API 测试失败（有些镜像只支持 Release 文件，不代理 API）。"
+      # Test the mirror using the same Raw URL pattern used by the self-updater.
+      # API support is a separate capability and must not determine whether a
+      # mirror is reported as usable for Raw/Release downloads.
+      mirror_test_stamp="$(date +%s 2>/dev/null || echo 0)"
+      mirror_test_url="${MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}?_=${mirror_test_stamp}"
+      mirror_test_file="${TMPDIR:-/tmp}/easytier-mirror-test.$$"
+      rm -f "$mirror_test_file"
+      if download_file "$mirror_test_url" "$mirror_test_file" >/dev/null 2>&1 && valid_installer_script "$mirror_test_file"; then
+        info "镜像 Raw 脚本访问正常，可用于安装脚本更新。"
+      else
+        warn "镜像 Raw 脚本测试失败；请检查镜像地址、网络或仓库文件是否可访问。"
+      fi
+      rm -f "$mirror_test_file"
+      if fetch_text "${MIRROR%/}/https://api.github.com/repos/$REPO/releases/latest?_=${mirror_test_stamp}" 2>/dev/null | grep -q '"tag_name"'; then
+        info "镜像 GitHub API 也可访问。"
+      else
+        info "镜像未通过 GitHub API 测试；这不代表 Raw 或 Release 下载不可用，核心下载仍会按文件有效性逐源回退。"
+      fi
     else
-      fetch_text "https://api.github.com/repos/$REPO/releases/latest" >/dev/null && info "GitHub API 可访问" || warn "GitHub API 无法访问。"
+      if fetch_text "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep -q '"tag_name"'; then
+        info "GitHub API 可访问。"
+      else
+        warn "GitHub API 无法访问或返回内容无效。"
+      fi
     fi ;;
   esac
 }
