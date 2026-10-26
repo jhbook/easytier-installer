@@ -803,14 +803,17 @@ update_script() {
   fi
   [ -f "$target" ] || die "无法定位当前脚本文件：$target。请先通过下载到文件的方式运行安装脚本。"
   tmp="${target}.new.$$"
-  url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
+  # Keep this in a dedicated variable: download_file currently uses global
+  # variables named url/out, so passing through it must not overwrite the
+  # official fallback URL in this function (POSIX sh has no portable local).
+  official_script_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
   # Self-update uses the same generic mirror configured in menu 10.
-  # Try the mirror first, then fall back to the official GitHub Raw URL.
+  # Try the mirror first, then fall back to the unmodified official GitHub Raw URL.
   rm -f "$tmp"
   if [ -n "${MIRROR:-}" ]; then
-    mirror="${MIRROR%/}/$url"
-    info "[1/2] 通过配置的 GitHub 镜像更新安装脚本：$mirror"
-    if download_file "$mirror" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
+    mirror_script_url="${MIRROR%/}/${official_script_url}"
+    info "[1/2] 通过配置的 GitHub 镜像更新安装脚本：$mirror_script_url"
+    if download_file "$mirror_script_url" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
       info "镜像下载完成，脚本身份和语法检查通过。"
     else
       warn "镜像下载失败、内容无效或语法检查失败，自动回退 GitHub 官方 Raw 源。"
@@ -820,8 +823,8 @@ update_script() {
     info "未配置 GitHub 镜像，跳过镜像源。"
   fi
   if [ ! -s "$tmp" ]; then
-    info "[2/2] 从 GitHub 官方 Raw 地址更新安装脚本：$url"
-    if ! download_file "$url" "$tmp" || ! valid_installer_script "$tmp"; then
+    info "[2/2] 从 GitHub 官方 Raw 地址更新安装脚本：$official_script_url"
+    if ! download_file "$official_script_url" "$tmp" || ! valid_installer_script "$tmp"; then
       rm -f "$tmp"
       die "安装脚本下载失败或内容无效：镜像源（如已配置）和 GitHub 官方 Raw 均未通过验证。请检查网络、仓库可见性、分支名及文件路径。"
     fi
