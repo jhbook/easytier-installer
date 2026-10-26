@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.3.2"
+SCRIPT_VERSION="0.3.3"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -840,8 +840,12 @@ update_script() {
   cp -p "$target" "${target}.bak" 2>/dev/null || :
   mv "$tmp" "$target" || { rm -f "$tmp"; die "替换脚本失败；旧脚本仍应保留。"; }
   info "安装管理脚本更新完成。"
-  say "当前运行脚本版本：v$SCRIPT_VERSION；新版本将在下次启动时显示。"
   say "旧脚本备份：${target}.bak"
+  say "正在重新启动最新版管理菜单……"
+  # Replace this process with the just-updated script so the user immediately
+  # lands in the new version's menu instead of continuing in the old process.
+  exec "$target" "$@"
+  die "无法启动更新后的管理脚本：$target"
 }
 
 update_all() {
