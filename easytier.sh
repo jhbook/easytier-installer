@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.0"
+SCRIPT_VERSION="0.4.1"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -816,7 +816,7 @@ update_script() {
   if [ ! -f "$target" ]; then warn "无法定位当前脚本文件：$target。请先通过下载到文件的方式运行安装脚本。"; return 1; fi
   tmp="${target}.new.$$"
   official_script_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-  cdn_script_url="https://cdn.jsdmirror.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
+  cdn_script_url="https://jsd.onmicrosoft.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
   # Add a timestamp query to each request to avoid stale CDN/proxy cache entries.
   cache_bust="$(date +%s 2>/dev/null || echo 0)"
   cdn_script_url="${cdn_script_url}?_=${cache_bust}"
@@ -1063,7 +1063,7 @@ if [ "$script_self" != "$SCRIPT_INSTALL_PATH" ]; then
       download_tool
       if [ "$DL_TOOL" != none ]; then
         bootstrap_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-        bootstrap_cdn_url="https://cdn.jsdmirror.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
+        bootstrap_cdn_url="https://jsd.onmicrosoft.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
         bootstrap_cache_bust="$(date +%s 2>/dev/null || echo 0)"
         bootstrap_url="${bootstrap_url}?_=${bootstrap_cache_bust}"
         bootstrap_cdn_url="${bootstrap_cdn_url}?_=${bootstrap_cache_bust}"

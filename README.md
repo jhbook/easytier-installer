@@ -23,13 +23,13 @@ wget -O /tmp/easytier.sh "https://raw.githubusercontent.com/jhbook/easytier-inst
 如果设备访问 GitHub Raw 较慢或失败，可以尝试通过镜像下载管理脚本：
 
 ```sh
-wget -O /tmp/easytier.sh "https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh" && sh /tmp/easytier.sh
+wget -O /tmp/easytier.sh "https://jsd.onmicrosoft.cn/gh/jhbook/easytier-installer@main/easytier.sh" && sh /tmp/easytier.sh
 ```
 
 也可以使用 `curl`：
 
 ```sh
-curl -fsSL "https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
+curl -fsSL "https://jsd.onmicrosoft.cn/gh/jhbook/easytier-installer@main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
 ```
 
 镜像服务的可用性可能变化；若下载失败，请改用 GitHub 原始地址或其他可信镜像。注意，管理脚本下载地址与 EasyTier 核心下载源不同：安装器会优先尝试 Gitee 上的 EasyTier Release，再尝试配置的 GitHub 镜像，最后回退 GitHub 官方 Release。
@@ -215,7 +215,7 @@ logread -e easytier
 
 菜单会显示当前安装脚本版本号。菜单 3 更新安装脚本时，按以下顺序尝试并在每一步检查脚本身份与 Shell 语法：
 
-1. jsDelivr 镜像：`https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh`
+1. jsDelivr 镜像：`https://jsd.onmicrosoft.cn/gh/jhbook/easytier-installer@main/easytier.sh`
 2. 菜单中配置的通用 GitHub 镜像（如果已配置）。
 3. GitHub 官方 Raw：`https://raw.githubusercontent.com/jhbook/easytier-installer/main/easytier.sh`。
 
