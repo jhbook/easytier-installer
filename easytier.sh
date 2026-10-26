@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.3.8"
+SCRIPT_VERSION="0.4.0"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -885,9 +885,9 @@ update_all() {
 }
 uninstall_all() {
   need_root
-  printf '卸载 EasyTier？配置文件默认保留，可选择删除。继续？[y/N] '
+  printf '确认卸载全部 EasyTier？将删除核心、服务、配置、数据库及 et 管理脚本，此操作不可恢复。[y/N] '
   read -r answer || answer=""
-  case "$answer" in y|Y|yes|YES) ;; *) return ;; esac
+  case "$answer" in y|Y|yes|YES) ;; *) info "已取消卸载。"; return 1 ;; esac
 
   os="$(detect_os)"
   # Stop the service first, then disable its boot entry before deleting init files.
@@ -913,55 +913,17 @@ uninstall_all() {
   rm -f "$CONF/run.sh" "$CONF/runtime.env"
   rm -rf "$BIN"
 
-  # The local Web port belongs to the Web component, not to retained EasyTier network data.
-  # Remove its persisted value even when the user chooses to keep the remaining settings.
-  if [ -f "$SETTINGS" ]; then
-    settings_tmp="$SETTINGS.uninstall.$$"
-    if sed '/^WEB_PORT=/d' "$SETTINGS" > "$settings_tmp"; then
-      chmod 600 "$settings_tmp" 2>/dev/null || :
-      mv "$settings_tmp" "$SETTINGS" || rm -f "$settings_tmp"
-    else
-      rm -f "$settings_tmp"
-      warn "无法清除已保存的 Web 端口设置：$SETTINGS"
-    fi
+  # Full uninstall: remove all EasyTier data/configuration and the manager itself.
+  rm -rf "$BASE" "$CONF"
+  if [ -f /usr/bin/et ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' /usr/bin/et 2>/dev/null; then
+    rm -f /usr/bin/et
   fi
-
-  printf '是否同时删除配置和数据库？[y/N] '
-  read -r answer || answer=""
-  case "$answer" in
-    y|Y|yes|YES)
-      rm -rf "$BASE" "$CONF"
-      if [ -f /usr/bin/et ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' /usr/bin/et 2>/dev/null; then rm -f /usr/bin/et; fi
-      info "配置、数据库、管理设置和 et 管理命令已删除。"
-      return 0
-      ;;
-    *) info "已保留数据与组网配置：$DATA；Web 端口设置已清除，et 管理命令保留。" ;;
-  esac
-  info "卸载操作完成。"
-}
-uninstall_manager_script() {
-  need_root
-  script_path="/usr/bin/et"
-  if [ ! -f "$script_path" ] || ! grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$script_path" 2>/dev/null; then
-    warn "未发现已安装的 et 管理脚本；未删除任何文件。"
-    return 1
-  fi
-  printf '仅卸载 et 管理脚本？EasyTier 核心、服务、配置和数据库均保留。[y/N] '
-  read -r answer || answer=""
-  case "$answer" in y|Y|yes|YES) ;; *) info "已取消卸载管理脚本。"; return 0 ;; esac
-
-  if ! rm -f "$script_path"; then
-    warn "删除管理脚本失败：$script_path"
-    return 1
-  fi
-  # Remove only the backup created by this installer's self-updater, and its
-  # interrupted temporary copies. Do not touch EasyTier runtime data/services.
   if [ -f /usr/bin/et.bak ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' /usr/bin/et.bak 2>/dev/null; then
     rm -f /usr/bin/et.bak
   fi
   rm -f /usr/bin/et.new.*
-  info "et 管理脚本已卸载。EasyTier 核心、服务、配置和数据库均未删除。"
-  exit 0
+  info "EasyTier 核心、服务、配置、数据库及 et 管理脚本已全部卸载。"
+  return 0
 }
 
 edit_local_config() {
@@ -1020,8 +982,7 @@ menu() {
     say "10. 下载源 / 镜像加速设置"
     say "11. 查看运行状态"
     say "12. 查看日志"
-    say "13. 卸载 EasyTier（核心、服务和数据）"
-    say "14. 卸载管理脚本 et（保留 EasyTier）"
+    say "13. 卸载全部 EasyTier（核心、服务、配置、数据库及 et 管理脚本）"
     say "0. 退出"
     say "=============================================="
     printf '请输入选项：'
@@ -1045,10 +1006,11 @@ menu() {
       10) (download_settings); pause ;;
       11) (show_status); pause ;;
       12) (show_logs); pause ;;
-      13) (uninstall_all); if [ ! -d "$BASE" ]; then exit 0; fi; pause ;;
-      14) uninstall_manager_script ;;
+      13)
+        if (uninstall_all); then exit 0; else pause; fi
+        ;;
       0) exit 0 ;;
-      *) warn "无效选项：$choice。请输入 0-14 之间的菜单编号。"; pause ;;
+      *) warn "无效选项：$choice。请输入 0-13 之间的菜单编号。"; pause ;;
     esac
   done
 }
