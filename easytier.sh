@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.3"
+SCRIPT_VERSION="0.4.4"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -117,7 +117,22 @@ save_settings() {
   chmod 600 "$SETTINGS" 2>/dev/null || :
 }
 detect_lan_ip() {
-  ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1
+  # Prefer the configured LAN address on OpenWrt. `ip route get 1.1.1.1`
+  # often returns the WAN source address, which makes the displayed Web URL
+  # unreachable from LAN clients and also breaks the frontend's API endpoint.
+  if have uci; then
+    lan_ip="$(uci -q get network.lan.ipaddr 2>/dev/null | head -n 1)"
+    case "$lan_ip" in
+      ''|0.0.0.0|127.*) ;;
+      *.*.*.*) printf '%s\n' "$lan_ip"; return 0 ;;
+    esac
+  fi
+  # On other Linux systems, prefer a private IPv4 address assigned locally.
+  if have ip; then
+    lan_ip="$(ip -o -4 addr show scope global 2>/dev/null | awk '{split($4,a,"/"); if (a[1] ~ /^10\./ || a[1] ~ /^192\.168\./ || a[1] ~ /^172\.(1[6-9]|2[0-9]|3[01])\./) {print a[1]; exit}}')"
+    [ -n "$lan_ip" ] && { printf '%s\n' "$lan_ip"; return 0; }
+    ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1
+  fi
 }
 detect_os() {
   if [ -f /etc/openwrt_release ] || grep -qi 'openwrt\|immortalwrt' /etc/os-release 2>/dev/null; then
@@ -519,7 +534,7 @@ trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
 case "$RUN_MODE" in
   local-web)
-    "$WEB" --api-server-port "$WEB_PORT" --api-host "http://${API_HOST}:${WEB_PORT}" --config-server-port "$CONFIG_PORT" --config-server-protocol udp &
+    "$WEB" --api-server-addr 0.0.0.0 --web-server-addr 0.0.0.0 --api-server-port "$WEB_PORT" --api-host "http://${API_HOST}:${WEB_PORT}" --config-server-port "$CONFIG_PORT" --config-server-protocol udp &
     WEB_PID=$!
     sleep 2
     "$CORE" --config-server "udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}" --listeners "$NODE_PORT" &
@@ -595,6 +610,7 @@ install_all() {
   need_root
   ensure_tools
   load_settings
+  previous_mode="$RUN_MODE"
   say "选择运行模式："
   say "1. 核心 + 本地 Web 管理端（资源占用较高）"
   say "2. 仅核心 + 本地 TOML 配置（轻量模式，默认）"
@@ -605,6 +621,12 @@ install_all() {
     3) RUN_MODE="remote-web" ;;
     *) RUN_MODE="config-file" ;;
   esac
+  if [ "$RUN_MODE" = "local-web" ] && [ "$previous_mode" != "local-web" ]; then
+    # Refresh the auto-detected address when switching from a non-Web mode;
+    # the saved value may be the router WAN IP rather than its LAN address.
+    API_HOST="$(detect_lan_ip)"
+    [ -n "$API_HOST" ] || API_HOST="127.0.0.1"
+  fi
   # The previous mode may have stored ports as 0; normalize after the user
   # chooses local Web, not only while loading the previous mode's settings.
   if [ "$RUN_MODE" = "local-web" ]; then
