@@ -1,126 +1,200 @@
-# EasyTier 跨平台安装管理脚本
+# EasyTier 安装与管理脚本
 
-一个面向 Linux、OpenWrt / ImmortalWrt 等设备的 EasyTier 命令行安装与管理脚本。提供交互式菜单，帮助安装、更新和管理 EasyTier 核心，并可根据设备资源选择不同运行模式。
+面向 OpenWrt、ImmortalWrt 及常见 Linux 系统的 EasyTier 交互式安装管理工具。脚本负责下载和管理 EasyTier 核心组件、选择运行模式、配置服务启动方式，并提供后续更新与卸载菜单。
 
-> **注意：** 当前脚本仍需在目标设备上进行实际安装和联网测试。运行前请先阅读脚本内容，并确认官方 Release 中存在与设备 CPU 架构匹配的安装包。请勿将未经验证的脚本直接用于重要生产设备。
-
-## 功能
-
-- 自动识别常见系统类型与 CPU 架构。
-- 按 Gitee Release → 配置的 GitHub 镜像 → GitHub 官方 Release 的顺序下载核心组件。
-- 提供三种运行模式：
-  1. **核心 + 本地 Web 管理端**：在同一设备上运行核心和 Web 组件，资源占用相对较高。
-  2. **仅核心 + 本地 TOML 配置**：只安装核心，适合闪存、内存较紧张的设备。
-  3. **仅核心 + 远程 Web 控制台**：核心运行在轻量设备上，连接另一台设备上的远程配置服务。
-- 管理服务启动、停止、重启和状态查看；本地配置文件模式在配置未填写前不会自动启动。
-- 查看运行日志。
-- 修改本地 Web 模式相关端口及 Web API 访问地址；其他模式提示在其配置位置修改。
-- 编辑本地 TOML 配置文件，或设置远程配置服务地址。
-- 更新 EasyTier 核心组件。
-- 从配置的 GitHub 仓库更新本安装脚本，并在替换前执行 Shell 语法检查。
-- 卸载组件；卸载时可选择保留或删除配置与数据。
-- 支持常见的 `curl` 或 `wget` 下载工具，并在需要时尝试安装 `unzip`。
-
-## 支持环境
-
-脚本会尝试识别以下服务管理环境：
-
-- OpenWrt / ImmortalWrt（`procd` / `/etc/init.d`）
-- 使用 systemd 的 Linux
-- OpenRC 环境
-- 部分 SysV / BusyBox init 环境
-
-脚本包含常见架构名称映射，例如 `x86_64`、`aarch64`、`armv7`、`armv6`、`i686`、`mips`、`mipsel`、`mips64el` 和 `riscv64`。**架构能被识别不代表官方一定提供对应的可运行二进制**；请以 EasyTier 官方 Release 的实际资产和设备 ABI 为准。
+> 本项目是第三方安装管理脚本，不是 EasyTier 官方项目。请在运行前检查脚本内容，并先在测试设备验证。识别到 CPU 架构不代表 EasyTier 官方一定提供相应可用的 Release 资产。
 
 ## 快速开始
+
+在目标设备的 root SSH 终端中执行：
 
 ```sh
 curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/heads/main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
 ```
-国内使用
+
+如果设备没有 `curl`，可以使用 `wget`：
+
 ```sh
-curl -fsSL "https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
+wget -O /tmp/easytier.sh "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/heads/main/easytier.sh" && sh /tmp/easytier.sh
 ```
-首次以 root 启动时，脚本会把管理程序安装到 `/usr/bin/et`，然后从这个固定路径启动菜单。之后可直接输入 `et` 打开管理菜单；菜单中的“更新安装脚本”会更新这份持久化文件，而不是更新 `/tmp` 中的临时副本。也可以手动下载脚本后运行；建议使用 root，以便自动安装到固定路径。
 
-脚本需要网络访问能力。根据下载和安装流程，系统通常需要 `curl` 或 `wget`、`unzip`，以及适合当前系统的服务管理工具。缺少 `unzip` 时脚本会尝试通过系统包管理器安装；如果自动安装失败，需要手动安装。
+首次以 root 运行时，脚本会尝试将管理脚本安装到 `/usr/bin/et`。安装成功后，之后输入以下命令即可打开菜单：
 
-## 运行模式怎么选
+```sh
+et
+```
+
+也支持在有可用控制终端的交互式 SSH 会话中使用管道启动：
+
+```sh
+curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/heads/main/easytier.sh" | sh
+```
+
+管道启动依赖可用的控制终端；在 cron、后台任务或无终端容器中不能使用交互菜单。为便于区分下载失败与运行失败，建议优先使用“下载到文件再执行”的方式。
+
+## 功能一览
+
+- 自动识别常见 Linux 系统、服务管理方式和 CPU 架构。
+- 提供本地 Web、本地 TOML 配置、远程 Web 三种运行模式。
+- 安装、更新 EasyTier 核心和当前模式需要的组件。
+- 管理服务启动、停止、重启、状态和日志。
+- 编辑本地 TOML 配置、设置远程 Web 配置服务器。
+- 修改本地 Web 模式的端口与 Web API 地址。
+- 设置下载镜像，并按多个来源尝试获取 EasyTier Release。
+- 从指定 GitHub 仓库更新本管理脚本，替换前检查脚本身份和 Shell 语法。
+- 卸载程序和服务，可选择保留或删除数据。
+
+## 安装模式
 
 | 模式 | 适用场景 | 说明 |
-|---|---|---|
-| 核心 + 本地 Web | 设备资源较充足，希望在本机管理 | 同时安装 `easytier-core` 与 `easytier-web-embed` |
-| 仅核心 + 本地配置 | 低闪存、低内存设备，习惯手动维护配置 | 只运行核心，配置文件位于 `/opt/easytier/data/config.toml` |
-| 仅核心 + 远程 Web | 轻量设备不适合运行 Web 组件 | 连接另一台设备提供的远程配置服务；需要填写正确的服务地址 |
+| --- | --- | --- |
+| 核心 + 本地 Web 管理端 | 设备资源较充足，希望在本机使用 Web 管理 | 安装 EasyTier 核心和 Web 组件，资源占用相对较高 |
+| 仅核心 + 本地 TOML 配置 | 低闪存设备或偏好手动编辑配置 | 只安装核心；编辑配置后再启动服务 |
+| 仅核心 + 远程 Web 控制台 | 设备资源有限，希望由其他设备提供 Web 管理 | 本机运行核心，并连接远程配置服务 |
 
-本地 Web 模式的默认 Web/API 端口为 `11211`，配置服务 UDP 端口默认为 `22020`。请根据网络环境检查端口占用和防火墙规则，并避免将管理接口直接暴露到不可信网络。
+首次安装默认选择轻量的“仅核心 + 本地 TOML 配置”模式。需要在设备本机使用 Web 管理时，请在安装菜单中选择本地 Web 模式。
 
-## 常用目录
-
-| 路径 | 用途 |
-|---|---|
-| `/opt/easytier/bin/` | EasyTier 核心和 Web 组件 |
-| `/opt/easytier/data/` | 运行数据和本地配置文件 |
-| `/etc/easytier-installer/settings` | 安装脚本保存的运行设置 |
-| `/etc/easytier-installer/run.sh` | 部分环境下使用的运行脚本 |
-
-具体文件是否存在取决于所选模式和当前系统。
-
-## 下载源与镜像
-
-菜单中的 **“下载源 / 镜像加速设置”** 可配置通用 GitHub 镜像前缀。EasyTier 核心安装包的下载顺序为：Gitee Release → 配置的通用镜像 → GitHub 官方 Release。获取最新版本号时优先请求 Gitee 的 `https://gitee.com/easytier/EasyTier/releases/latest`，通过重定向后的 `/releases/tag/版本号` 提取标签；如果 Gitee 页面无法解析，再尝试配置的 GitHub 镜像 API，最后尝试 GitHub 官方 API。 解析 Gitee 页面时会先保存到临时文件再提取版本号，避免异常响应中的 NUL 字节触发 Shell 命令替换警告。 下载 ZIP 后会单独尝试一次 Gitee 的 `.sha256` 文件；如果该文件不存在（404），会提示并跳过独立哈希校验，不会因此重新轮询其他安装包下载源。无论如何都会先执行 ZIP 完整性检查；若哈希文件存在且校验不匹配，则拒绝安装。
-
-Gitee 最新 Release 入口：[https://gitee.com/easytier/EasyTier/releases/latest](https://gitee.com/easytier/EasyTier/releases/latest)。该地址会跳转到具体版本标签，例如：[v2.6.4](https://gitee.com/easytier/EasyTier/releases/tag/v2.6.4)。
-
-镜像前缀应能代理脚本拼接出的完整 GitHub URL，例如：
-
-```text
-https://ghfast.top/
-```
-
-设置为 `official` 可清空自定义镜像。脚本优先尝试 Gitee Release 对应的版本与资产文件；Gitee 下载失败后，再尝试配置的通用镜像，最后回退到 GitHub 官方地址。Gitee 上的版本或资产可能与 GitHub 不完全同步；若 Gitee 下载失败，脚本会继续尝试 GitHub 官方源。某些镜像只支持下载 Release 文件，不支持 GitHub API，因此“镜像 API 测试失败”不一定代表 Release 文件下载也失败。
-
-## 配置文件
-
-仅核心 + 本地配置模式使用：
+本地配置文件路径：
 
 ```text
 /opt/easytier/data/config.toml
 ```
 
-建议使用 [EasyTier 官方配置文档](https://easytier.cn/guide/network/config-file.html) 或官方配置助手生成适用于当前版本的 TOML 配置，再编辑文件。为了避免安装时先用空白占位配置启动，选择此模式后脚本只安装并写入服务，不会自动启动服务或启用开机自启。先编辑并保存 `config.toml`，然后回到菜单选择 **“启动服务”**；脚本会检查配置文件不是空白注释文件，再启动并启用开机自启。后续修改配置后，再使用“重启服务”使其生效。更新核心时，脚本会保留更新前的服务运行状态：原本停止的服务不会被自动启动。
+本地 Web 模式默认端口：
+
+- Web/API 端口：`11211`
+- 配置服务 UDP 端口：`22020`
+- 节点端口默认值：`11010`
+
+请根据实际网络环境检查端口占用和防火墙策略，不要把 Web/API 管理端口直接暴露给不可信网络。
+
+## 菜单功能
+
+| 选项 | 功能 |
+| --- | --- |
+| 1 | 安装 EasyTier，并选择运行模式 |
+| 2 | 更新 EasyTier 核心/组件 |
+| 3 | 更新安装管理脚本 |
+| 4–6 | 启动、停止、重启服务 |
+| 7 | 修改端口 / Web API 地址 |
+| 8 | 编辑本地 TOML 配置文件 |
+| 9 | 设置远程 Web 配置服务器 |
+| 10 | 设置下载源 / 镜像加速 |
+| 11–12 | 查看运行状态、日志 |
+| 13 | 卸载 EasyTier |
+| 0 | 退出 |
+
+在本地 TOML 配置模式下，安装完成后服务会保持停止状态，也不会自动启用开机启动。请先编辑并保存 `config.toml`，再从菜单选择“启动服务”。后续修改配置后，选择“重启服务”使其生效。
+
+## 系统与依赖
+
+脚本会尝试适配以下服务管理环境：
+
+- OpenWrt / ImmortalWrt（procd）
+- 使用 systemd 的 Linux
+- OpenRC
+- 部分 SysV / BusyBox init 环境
+
+脚本使用 `curl` 或 `wget` 下载文件，并需要 `unzip` 解压 Release 压缩包。若缺少 `unzip`，脚本会尝试调用系统包管理器安装；自动安装失败时，需要手动安装依赖。安装组件和创建系统服务需要 root 权限。
+
+脚本包含常见架构映射，例如 `x86_64`、`aarch64`、`armv7`、`armv6`、`i686`、`mips`、`mipsel`、`mips64el`、`riscv64`。最终是否有匹配的可用二进制，以 EasyTier 官方 Release 的实际资产和设备 ABI 为准。
+
+## 下载源与镜像
+
+菜单中的“下载源 / 镜像加速设置”可配置 GitHub 镜像前缀。核心 Release 下载按以下顺序尝试：
+
+1. Gitee 上对应的 EasyTier Release 资产。
+2. 配置的 GitHub 镜像。
+3. GitHub 官方 Release。
+
+获取最新版本信息时，脚本优先解析 Gitee 的 Release 页面；无法取得版本号时，再尝试 GitHub 镜像 API 和 GitHub 官方 API。下载后会检查 ZIP 完整性；如果获取到 SHA-256 校验文件，也会验证摘要。若 Gitee 上没有校验文件，会提示并跳过独立哈希校验，但仍会执行 ZIP 完整性检查。
+
+默认镜像前缀为：
+
+```text
+https://ghfast.top/
+```
+
+镜像前缀需要能够代理脚本拼接出的完整 GitHub URL。也可以在菜单中选择官方源，清除自定义镜像。不同镜像对 Release 文件和 GitHub API 的支持可能不同，API 测试失败不一定代表 Release 文件下载失败。
+
+## 安装脚本自更新
+
+脚本默认从以下仓库更新管理脚本：
+
+```sh
+SCRIPT_REPO="jhbook/easytier-installer"
+SCRIPT_BRANCH="main"
+SCRIPT_PATH="easytier.sh"
+```
+
+在菜单中选择“更新安装脚本”后，脚本会尝试使用已配置的镜像下载 Raw 文件；镜像下载失败或返回内容无效时，回退到 GitHub 官方 Raw 地址。替换前会检查文件非空、脚本标识和 `sh -n` 语法，并尝试备份旧文件为 `.bak`。
+
+持久化管理脚本路径为：
+
+```text
+/usr/bin/et
+```
+
+如果该路径已存在且不像本项目脚本，为避免覆盖其他程序，首次安装不会强行替换它。此时请检查冲突文件，确认后再处理。
+
+## 常用路径
+
+| 路径 | 用途 |
+| --- | --- |
+| `/opt/easytier/bin/` | EasyTier 核心与 Web 组件 |
+| `/opt/easytier/data/` | 本地配置与运行数据 |
+| `/etc/easytier-installer/settings` | 安装管理脚本的设置 |
+| `/etc/easytier-installer/run.sh` | 服务运行包装脚本 |
+| `/usr/bin/et` | 持久化管理脚本入口 |
+
+具体文件会随运行模式和系统类型变化，并非每台设备都会拥有表中全部文件。
 
 ## 服务与日志
 
-可以在菜单中启动、停止、重启服务，或查看状态和日志。常见日志查看方式：
+可以直接在管理菜单中启动、停止、重启服务，查看运行状态和日志。也可根据系统使用相应日志工具，例如：
 
 ```sh
-# systemd 环境
+# systemd 系统
 journalctl -u easytier -f
 
 # OpenWrt / ImmortalWrt
 logread -e easytier
 ```
 
-实际服务管理方式取决于脚本识别到的系统环境。
+实际服务名称和日志位置可能随系统环境而异。
 
-## 服务与更新行为
+## 卸载说明
 
-- 更新核心前会记录服务是否正在运行；只有原本运行的服务才会在更新后重启，原本停止的服务继续保持停止。
-- 启动或重启本地配置文件模式时，会先检查 `config.toml` 是否存在有效的非注释配置行；这只是基础检查，不能替代 EasyTier 自身的 TOML 解析验证。
-- 服务停止时，运行包装脚本会清理核心和 Web 子进程，减少残留进程。
-- 设置文件以安全引用方式写入，并通过临时文件替换，避免用户输入中的单引号破坏设置文件。
-- 安装前会先验证所需的核心和 Web 二进制，再替换现有文件；仍建议在生产设备升级前备份配置。
+卸载时脚本会先停止服务并尝试禁用开机启动，再清理服务入口和核心/Web 二进制。随后可以选择：
 
-## 安全提示
+- **保留数据**：保留 EasyTier 本地数据和组网配置，同时清除已卸载 Web 组件对应的端口设置；保留 `et` 管理命令，方便后续重新安装或管理。
+- **删除数据**：进一步删除配置、数据库和管理设置，并尝试移除本项目安装的 `/usr/bin/et` 命令。
 
-- 建议先在测试设备上运行，执行前检查脚本和下载来源。
-- 请勿将 Web/API 管理端口暴露到公网；如需跨网访问，优先使用可信的 VPN、访问控制和防火墙策略。
-- 远程 Web 模式必须填写正确的远程配置服务地址，并确保网络可达。
-- 卸载时会先停止服务、禁用对应开机启动并清理常见残留启动链接；无论是否保留数据，都会删除运行包装脚本、运行环境文件和核心/Web 二进制，并清除已保存的本地 Web 端口设置。选择保留时，会保留 `/opt/easytier/data/` 与其他管理设置；Web 未安装时菜单显示“Web 端口：未配置”。选择删除时会进一步清除数据和全部管理设置。
-- 脚本的 Shell 语法检查不等同于所有设备、架构和运行模式均已实测成功。
+卸载前请确认是否仍需要 `config.toml`、数据库和其他运行数据。建议先备份重要配置。
+
+## 故障排查
+
+- **提示缺少下载工具**：安装 `curl` 或 `wget` 后重试。
+- **提示缺少 `unzip`**：手动安装 `unzip`，再运行安装菜单。
+- **下载失败**：在菜单中更换镜像或切换到官方源；确认设备能访问相应站点。
+- **菜单直接退出**：确认是在交互式 SSH/终端中运行，并使用“下载到文件再执行”的命令。
+- **本地配置模式无法启动**：检查 `/opt/easytier/data/config.toml` 是否已填写有效配置；基础检查不等于完整 TOML 语法验证。
+- **没有匹配的 Release 资产**：确认设备 CPU 架构、ABI 与 EasyTier 官方发布的二进制相符。
+- **`et` 命令不存在**：确认首次运行有 root 权限，且 `/usr/bin` 位于 `PATH`；也可以运行 `/usr/bin/et`。
+
+## 安全与测试说明
+
+- EasyTier 的网络名称、密钥和配置应妥善保管，不要公开包含敏感信息的配置文件。
+- 不要将 Web/API 管理接口暴露到公网；跨网管理应配合可信组网、访问控制和防火墙。
+- 执行脚本前请审查来源和内容；生产设备升级前先备份配置。
+- Shell 语法检查和压缩包完整性检查不代表已在所有设备上完成实测。请先在测试设备验证安装、启动、联网、更新与卸载流程。
 
 ## 相关链接
 
 - [EasyTier 官方 GitHub 仓库](https://github.com/EasyTier/EasyTier)
-- [EasyTier 官方配置文档](https://easytier.cn/guide/network/config-file.html)
+- [EasyTier 官方文档](https://easytier.cn/)
+- [EasyTier 配置文件文档](https://easytier.cn/guide/network/config-file.html)
+
+## 许可
+
+请根据本仓库实际发布的源代码、脚本和所包含组件确认并补充许可证信息。本文档不单独声明未经确认的许可证。

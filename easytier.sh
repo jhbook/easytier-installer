@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="0.3.0"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -25,17 +25,29 @@ DEFAULT_WEB_PORT="11211"
 DEFAULT_CONFIG_PORT="22020"
 DEFAULT_NODE_PORT="11010"
 DEFAULT_USER="easytier"
-DEFAULT_MODE="local-web"
+DEFAULT_MODE="config-file"
 DEFAULT_REMOTE_URL=""
 DEFAULT_MIRROR="https://ghfast.top/"
-TMPDIR_ET="${TMPDIR:-/tmp}/easytier-install.$$"
+TMPDIR_ET=""
 
 # ---------- helpers ----------
+cleanup_temp() {
+  if [ -n "${TMPDIR_ET:-}" ] && [ -d "$TMPDIR_ET" ]; then rm -rf "$TMPDIR_ET"; fi
+}
+trap 'cleanup_temp' EXIT
 say()  { printf '%s\n' "$*"; }
 info() { printf '[信息] %s\n' "$*"; }
 warn() { printf '[提示] %s\n' "$*" >&2; }
 die()  { printf '[错误] %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+# Always read menu input from the controlling terminal when one exists. This lets
+# interactive mode work even when the script itself was supplied through a pipe.
+read() {
+  if [ -t 0 ]; then command read "$@"
+  elif ( : </dev/tty ) 2>/dev/null; then command read "$@" </dev/tty
+  else command read "$@"
+  fi
+}
 pause() { printf '\n按回车键继续...'; read -r _dummy || :; }
 is_root() { [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; }
 valid_port() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null; }
@@ -62,6 +74,13 @@ load_settings() {
   : "${REMOTE_URL:=$DEFAULT_REMOTE_URL}"
   : "${MIRROR:=$DEFAULT_MIRROR}"
   : "${VERSION:=latest}"
+  # Older installs may have stored port 0 after switching away from local Web.
+  # Restore sensible defaults when local Web mode is selected again.
+  if [ "$RUN_MODE" = "local-web" ]; then
+    valid_port "$WEB_PORT" || WEB_PORT="$DEFAULT_WEB_PORT"
+    valid_port "$CONFIG_PORT" || CONFIG_PORT="$DEFAULT_CONFIG_PORT"
+    valid_port "$NODE_PORT" || NODE_PORT="$DEFAULT_NODE_PORT"
+  fi
   if [ -z "${API_HOST:-}" ]; then API_HOST="$(detect_lan_ip)"; fi
 }
 shell_quote() {
@@ -134,6 +153,12 @@ download_file() {
     *) return 127 ;;
   esac
 }
+valid_installer_script() {
+  candidate="$1"
+  [ -s "$candidate" ] || return 1
+  sh -n "$candidate" >/dev/null 2>&1 || return 1
+  grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$candidate" 2>/dev/null
+}
 fetch_text() {
   url="$1"
   case "$DL_TOOL" in
@@ -176,7 +201,8 @@ latest_version() {
   # canonical release URL from a temporary file. Do not put the whole HTML response
   # in command substitution: unexpected NUL bytes in a response trigger shell warnings.
   if [ -z "$v" ]; then
-    page_file="${TMPDIR:-/tmp}/easytier-gitee-latest.$$"
+    page_file="$(mktemp "${TMPDIR:-/tmp}/easytier-gitee-latest.XXXXXX" 2>/dev/null || :)"
+    [ -n "$page_file" ] || page_file="${TMPDIR:-/tmp}/easytier-gitee-latest.$$"
     rm -f "$page_file"
     case "$DL_TOOL" in
       curl) curl -fsSL --connect-timeout 8 --max-time 25 "$latest_url" -o "$page_file" 2>/dev/null || : ;;
@@ -226,20 +252,23 @@ download_with_fallback() {
     https://github.com/EasyTier/EasyTier/releases/download/*)
       gitee_url="$(printf '%s' "$original" | sed 's#^https://github.com/EasyTier/EasyTier/releases/download/#https://gitee.com/easytier/EasyTier/releases/download/#')"
       info "优先尝试 Gitee Release 源：$gitee_url"
-      if download_file "$gitee_url" "$output" && [ -s "$output" ]; then return 0; fi
-      warn "Gitee Release 下载失败，尝试配置的 GitHub 镜像。"
+      if download_file "$gitee_url" "$output" && [ -s "$output" ] && unzip -t "$output" >/dev/null 2>&1; then return 0; fi
+      warn "Gitee Release 下载失败或 ZIP 无效，尝试配置的 GitHub 镜像。"
       rm -f "$output"
       ;;
   esac
   if [ -n "${MIRROR:-}" ]; then
     u="$(mirror_url "$original")"
     info "尝试配置的 GitHub 镜像源：$u"
-    if download_file "$u" "$output" && [ -s "$output" ]; then return 0; fi
-    warn "配置的镜像下载失败，回退 GitHub 官方源。"
+    if download_file "$u" "$output" && [ -s "$output" ] && unzip -t "$output" >/dev/null 2>&1; then return 0; fi
+    warn "配置的镜像下载失败或 ZIP 无效，回退 GitHub 官方源。"
     rm -f "$output"
   fi
   info "尝试 GitHub 官方源：$original"
-  download_file "$original" "$output" && [ -s "$output" ]
+  if download_file "$original" "$output" && [ -s "$output" ] && unzip -t "$output" >/dev/null 2>&1; then return 0; fi
+  rm -f "$output"
+  warn "GitHub 官方源下载失败或 ZIP 无效。"
+  return 1
 }
 check_checksum_if_available() {
   # Check the matching Gitee checksum once only. A missing checksum must not
@@ -257,6 +286,7 @@ check_checksum_if_available() {
   case "$expected" in
     ''|*[!0-9a-f]*) warn "SHA-256 文件格式无效，拒绝安装。"; return 1 ;;
   esac
+  [ "${#expected}" -eq 64 ] || { warn "SHA-256 长度无效，拒绝安装。"; return 1; }
   if have sha256sum; then actual="$(sha256sum "$zipfile" | awk '{print $1}')"
   elif have shasum; then actual="$(shasum -a 256 "$zipfile" | awk '{print $1}')"
   else warn "存在 SHA-256 文件但系统没有 sha256sum/shasum，跳过哈希校验。"; return 0
@@ -275,7 +305,12 @@ get_asset_and_extract() {
   info "检测到架构：$arch"
   [ "$VERSION" != latest ] || VERSION="$(latest_version)" || die "无法获取最新版本号。请检查 Gitee latest Release 页面是否可访问，或在下载源设置中配置可用镜像。"
   info "准备下载 EasyTier 版本：$VERSION"
-  mkdir_p "$TMPDIR_ET"
+  if have mktemp; then
+    TMPDIR_ET="$(mktemp -d "${TMPDIR:-/tmp}/easytier-install.XXXXXX")" || die "无法创建临时目录；可设置 TMPDIR 指向有足够空间的可写目录。"
+  else
+    TMPDIR_ET="${TMPDIR:-/tmp}/easytier-install.$$"
+    (umask 077 && mkdir "$TMPDIR_ET") 2>/dev/null || die "无法创建临时目录；可设置 TMPDIR 指向有足够空间的可写目录。"
+  fi
   zip="$TMPDIR_ET/easytier.zip"
   url="$(asset_url "$arch" "$VERSION")"
   download_with_fallback "$url" "$zip" || die "下载失败：$url"
@@ -298,13 +333,35 @@ get_asset_and_extract() {
     chmod 755 "$WEB.new"
     "$WEB.new" --help >/dev/null 2>&1 || { rm -f "$CORE.new" "$WEB.new"; die "easytier-web-embed 无法运行，可能是 CPU/ABI 不兼容。"; }
   fi
-  mv "$CORE.new" "$CORE" || die "替换 EasyTier 核心失败。"
+  old_core="$BIN/easytier-core.old.$$"
+  old_web="$BIN/easytier-web-embed.old.$$"
+  had_core=no; had_web=no
+  if [ -f "$CORE" ]; then mv "$CORE" "$old_core" || die "无法暂存旧核心，未替换现有安装。"; had_core=yes; fi
+  if [ "$RUN_MODE" = "local-web" ] && [ -f "$WEB" ]; then
+    if ! mv "$WEB" "$old_web"; then
+      [ "$had_core" = yes ] && mv "$old_core" "$CORE" 2>/dev/null || :
+      die "无法暂存旧 Web 组件，未完成更新。"
+    fi
+    had_web=yes
+  fi
+  if ! mv "$CORE.new" "$CORE"; then
+    [ "$had_core" = yes ] && mv "$old_core" "$CORE" 2>/dev/null || :
+    [ "$had_web" = yes ] && mv "$old_web" "$WEB" 2>/dev/null || :
+    die "替换 EasyTier 核心失败，已尝试恢复旧版本。"
+  fi
   if [ "$RUN_MODE" = "local-web" ]; then
-    mv "$WEB.new" "$WEB" || die "替换 Web 二进制失败。核心已更新，请检查 Web 文件。"
+    if ! mv "$WEB.new" "$WEB"; then
+      rm -f "$CORE"
+      [ "$had_core" = yes ] && mv "$old_core" "$CORE" 2>/dev/null || :
+      [ "$had_web" = yes ] && mv "$old_web" "$WEB" 2>/dev/null || :
+      die "替换 Web 二进制失败，已尝试恢复旧版本。"
+    fi
   else
     rm -f "$WEB"
   fi
+  rm -f "$old_core" "$old_web"
   rm -rf "$TMPDIR_ET"
+  TMPDIR_ET=""
   info "核心与 Web 二进制安装完成。"
 }
 make_config() {
@@ -340,20 +397,24 @@ write_runtime_env() {
   # Used by service scripts. Keep the web API host reachable from other LAN devices.
   [ -n "${API_HOST:-}" ] || API_HOST="$(detect_lan_ip)"
   [ -n "${API_HOST:-}" ] || API_HOST="127.0.0.1"
-  cat > "$CONF/runtime.env" <<EOF
-BASE='$BASE'
-BIN='$BIN'
-DATA='$DATA'
-CORE='$CORE'
-WEB='$WEB'
-RUN_MODE='$RUN_MODE'
-REMOTE_URL='$REMOTE_URL'
-WEB_PORT='$WEB_PORT'
-CONFIG_PORT='$CONFIG_PORT'
-NODE_PORT='$NODE_PORT'
-API_HOST='$API_HOST'
-USERNAME='$USERNAME'
-EOF
+  env_tmp="$CONF/runtime.env.tmp.$$"
+  umask 077
+  {
+    printf 'BASE=%s\n' "$(shell_quote "$BASE")"
+    printf 'BIN=%s\n' "$(shell_quote "$BIN")"
+    printf 'DATA=%s\n' "$(shell_quote "$DATA")"
+    printf 'CORE=%s\n' "$(shell_quote "$CORE")"
+    printf 'WEB=%s\n' "$(shell_quote "$WEB")"
+    printf 'RUN_MODE=%s\n' "$(shell_quote "$RUN_MODE")"
+    printf 'REMOTE_URL=%s\n' "$(shell_quote "$REMOTE_URL")"
+    printf 'WEB_PORT=%s\n' "$(shell_quote "$WEB_PORT")"
+    printf 'CONFIG_PORT=%s\n' "$(shell_quote "$CONFIG_PORT")"
+    printf 'NODE_PORT=%s\n' "$(shell_quote "$NODE_PORT")"
+    printf 'API_HOST=%s\n' "$(shell_quote "$API_HOST")"
+    printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
+  } > "$env_tmp" || { rm -f "$env_tmp"; die "写入运行环境文件失败。"; }
+  chmod 600 "$env_tmp" 2>/dev/null || :
+  mv "$env_tmp" "$CONF/runtime.env" || { rm -f "$env_tmp"; die "更新运行环境文件失败。"; }
   chmod 600 "$CONF/runtime.env" 2>/dev/null || :
 }
 write_systemd() {
@@ -526,14 +587,21 @@ install_all() {
   load_settings
   say "选择运行模式："
   say "1. 核心 + 本地 Web 管理端（资源占用较高）"
-  say "2. 仅核心 + 本地配置文件（低闪存/低内存）"
-  say "3. 仅核心 + 远程 Web 控制台（推荐低资源设备远程管理）"
-  printf '请选择 [1-3，默认 1]：'; read -r x || x=""
+  say "2. 仅核心 + 本地 TOML 配置（轻量模式，默认）"
+  say "3. 仅核心 + 远程 Web 控制台（轻量模式）"
+  printf '请选择 [1-3，默认 2]：'; read -r x || x=""
   case "$x" in
-    2) RUN_MODE="config-file" ;;
+    1) RUN_MODE="local-web" ;;
     3) RUN_MODE="remote-web" ;;
-    *) RUN_MODE="local-web" ;;
+    *) RUN_MODE="config-file" ;;
   esac
+  # The previous mode may have stored ports as 0; normalize after the user
+  # chooses local Web, not only while loading the previous mode's settings.
+  if [ "$RUN_MODE" = "local-web" ]; then
+    valid_port "$WEB_PORT" || WEB_PORT="$DEFAULT_WEB_PORT"
+    valid_port "$CONFIG_PORT" || CONFIG_PORT="$DEFAULT_CONFIG_PORT"
+    valid_port "$NODE_PORT" || NODE_PORT="$DEFAULT_NODE_PORT"
+  fi
   if [ "$RUN_MODE" = "local-web" ]; then
     printf 'Web/API 端口 [%s]: ' "$WEB_PORT"; read -r x || x=""; [ -n "$x" ] && WEB_PORT="$x"
     valid_port "$WEB_PORT" || die "Web/API 端口无效。"
@@ -568,7 +636,7 @@ install_all() {
       say "配置服务器：udp://0.0.0.0:${CONFIG_PORT}"
       say "核心连接地址：udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}"
       ;;
-    config-file) say "运行模式：仅核心 + 本地配置文件"; say "配置文件：$DATA/config.toml"; say "服务已保持停止且未设置开机自启。请先编辑配置文件，完成后回到菜单选择 3 启动服务。" ;;
+    config-file) say "运行模式：仅核心 + 本地配置文件"; say "配置文件：$DATA/config.toml"; say "服务已保持停止且未设置开机自启。请先编辑配置文件，完成后回到菜单选择 4 启动服务。" ;;
     remote-web) say "运行模式：仅核心 + 远程 Web 控制台"; say "远程配置服务器：$REMOTE_URL" ;;
   esac
   say "日志：systemd 可用 journalctl -u easytier -f；OpenWrt 可用 logread -e easytier。"
@@ -696,11 +764,16 @@ show_status() {
   fi
   load_settings
   say "运行模式：$RUN_MODE"
-  say "Web/API 端口：$WEB_PORT"
-  say "配置服务器端口：$CONFIG_PORT/UDP"
+  if [ "$RUN_MODE" = "local-web" ] && [ -x "$WEB" ]; then
+    say "Web/API 端口：$WEB_PORT"
+    say "配置服务器端口：$CONFIG_PORT/UDP"
+    say "Web API 地址：http://${API_HOST:-127.0.0.1}:${WEB_PORT}"
+  else
+    say "Web/API 端口：未配置"
+    [ "$RUN_MODE" = "config-file" ] || say "配置服务器端口：未配置"
+  fi
   [ -n "${REMOTE_URL:-}" ] && say "远程配置服务器：$REMOTE_URL"
   say "用户名：$USERNAME"
-  if [ "$RUN_MODE" = "local-web" ]; then say "Web API 地址：http://${API_HOST:-127.0.0.1}:${WEB_PORT}"; fi
 }
 show_logs() {
   if have journalctl; then journalctl -u easytier.service -n 100 --no-pager
@@ -718,12 +791,17 @@ update_script() {
   esac
   download_tool
   [ "$DL_TOOL" != none ] || die "缺少 curl/wget，无法更新安装脚本。"
-  target="$0"
-  case "$target" in
-    /*) ;;
-    *) target="$(pwd)/$target" ;;
-  esac
-  [ -f "$target" ] || die "无法定位当前脚本文件：$target。请用 sh /完整路径/easytier.sh 运行后重试。"
+  SCRIPT_INSTALL_PATH="/usr/bin/et"
+  if [ -f "$SCRIPT_INSTALL_PATH" ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
+    target="$SCRIPT_INSTALL_PATH"
+  else
+    target="$0"
+    case "$target" in
+      /*) ;;
+      *) target="$(pwd)/$target" ;;
+    esac
+  fi
+  [ -f "$target" ] || die "无法定位当前脚本文件：$target。请先通过下载到文件的方式运行安装脚本。"
   tmp="${target}.new.$$"
   url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
   # Self-update uses the same generic mirror configured in menu 10.
@@ -732,10 +810,10 @@ update_script() {
   if [ -n "${MIRROR:-}" ]; then
     mirror="${MIRROR%/}/$url"
     info "[1/2] 通过配置的 GitHub 镜像更新安装脚本：$mirror"
-    if download_file "$mirror" "$tmp" >/dev/null 2>&1 && [ -s "$tmp" ]; then
-      info "镜像下载完成，正在验证脚本内容。"
+    if download_file "$mirror" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
+      info "镜像下载完成，脚本身份和语法检查通过。"
     else
-      warn "镜像下载失败或返回空文件，自动回退 GitHub 官方 Raw 源。"
+      warn "镜像下载失败、内容无效或语法检查失败，自动回退 GitHub 官方 Raw 源。"
       rm -f "$tmp"
     fi
   else
@@ -743,17 +821,11 @@ update_script() {
   fi
   if [ ! -s "$tmp" ]; then
     info "[2/2] 从 GitHub 官方 Raw 地址更新安装脚本：$url"
-    if ! download_file "$url" "$tmp" || [ ! -s "$tmp" ]; then
+    if ! download_file "$url" "$tmp" || ! valid_installer_script "$tmp"; then
       rm -f "$tmp"
-      die "安装脚本下载失败：镜像源（如已配置）和 GitHub 官方 Raw 均不可用。请检查网络、仓库可见性、分支名及文件路径。"
+      die "安装脚本下载失败或内容无效：镜像源（如已配置）和 GitHub 官方 Raw 均未通过验证。请检查网络、仓库可见性、分支名及文件路径。"
     fi
-    info "GitHub 官方源下载完成，正在验证脚本内容。"
-  fi
-  [ -s "$tmp" ] || { rm -f "$tmp"; die "下载到的脚本为空。"; }
-  if ! sh -n "$tmp"; then rm -f "$tmp"; die "新脚本语法检查失败，保留当前版本。"; fi
-  if ! grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$tmp"; then
-    rm -f "$tmp"
-    die "下载文件未通过脚本身份检查，拒绝替换。请确认仓库路径和文件名。"
+    info "GitHub 官方源下载完成，脚本身份和语法检查通过。"
   fi
   chmod 755 "$tmp" || { rm -f "$tmp"; die "无法设置新脚本权限。"; }
   cp -p "$target" "${target}.bak" 2>/dev/null || :
@@ -766,6 +838,7 @@ update_script() {
 update_all() {
   need_root
   load_settings
+  [ -x "$CORE" ] || die "尚未安装 EasyTier 核心，请先选择菜单 1 安装。"
   ensure_tools
   was_active=no
   service_is_active && was_active=yes
@@ -826,8 +899,13 @@ uninstall_all() {
   printf '是否同时删除配置和数据库？[y/N] '
   read -r answer || answer=""
   case "$answer" in
-    y|Y|yes|YES) rm -rf "$BASE" "$CONF"; info "配置、数据库和管理设置已删除。" ;;
-    *) info "已保留数据与组网配置：$DATA；Web 端口设置已清除。" ;;
+    y|Y|yes|YES)
+      rm -rf "$BASE" "$CONF"
+      if [ -f /usr/bin/et ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' /usr/bin/et 2>/dev/null; then rm -f /usr/bin/et; fi
+      info "配置、数据库、管理设置和 et 管理命令已删除。"
+      exit 0
+      ;;
+    *) info "已保留数据与组网配置：$DATA；Web 端口设置已清除，et 管理命令保留。" ;;
   esac
   info "卸载操作完成。"
 }
@@ -867,10 +945,10 @@ menu() {
     say "=============================================="
     say "系统：$(detect_os)    架构：$(detect_arch)"
     say "模式：$RUN_MODE    核心：$([ -x "$CORE" ] && echo 已安装 || echo 未安装)    Web：$([ -x "$WEB" ] && echo 已安装 || echo 未安装)"
-    if [ -x "$WEB" ]; then
+    if [ "$RUN_MODE" = "local-web" ] && [ -x "$WEB" ]; then
       say "Web 端口：$WEB_PORT    配置服务端口：$CONFIG_PORT/UDP"
     else
-      say "Web 端口：未配置    配置服务端口：$CONFIG_PORT/UDP"
+      say "Web 端口：未配置    配置服务端口：未配置"
     fi
     say "下载源：Gitee Release → ${MIRROR:-配置的 GitHub 镜像（未设置则跳过）} → GitHub 官方源"
     say "----------------------------------------------"
@@ -890,7 +968,10 @@ menu() {
     say "0. 退出"
     say "=============================================="
     printf '请输入选项：'
-    read -r choice || exit 0
+    if ! read -r choice; then
+      warn "无法读取终端输入。请确认当前 SSH/终端支持交互输入；无终端环境不能运行管理菜单。"
+      exit 1
+    fi
     case "$choice" in
       1) install_all; pause ;;
       2) update_all; pause ;;
@@ -923,9 +1004,16 @@ EasyTier 跨平台安装管理工具
 安装时需要 root 权限。核心组件下载顺序：Gitee Release、配置的 GitHub 镜像、GitHub 官方 Release。
 管理命令：安装后可直接运行 et。
 脚本自更新：从菜单选择“更新安装脚本”，更新固定路径中的管理脚本。
-安装模式：核心+本地 Web、核心+本地 TOML 配置、核心+远程 Web 控制。低资源设备建议选择后两种。仅本地 Web 模式会安装 easytier-web-embed。
+首次安装默认选择轻量的“核心 + 本地 TOML 配置”模式；需要 Web 页面时可选择本地 Web 模式。仅本地 Web 模式会安装 easytier-web-embed。
+交互脚本可通过文件运行；若使用管道执行，必须有可用的控制终端。推荐先下载到文件，以便明确检查下载结果。
 EOF
   exit 0
+fi
+
+# A menu needs a real terminal. If invoked non-interactively with no controlling
+# terminal, fail clearly instead of reading script text as menu answers.
+if [ ! -t 0 ] && ! ( : </dev/tty ) 2>/dev/null; then
+  die "这是交互式管理菜单，需要终端输入。请在 SSH/终端中运行，或先下载到文件再执行。"
 fi
 
 # Persist the management script outside /tmp so menu option 3 can update the
@@ -937,20 +1025,37 @@ case "$script_self" in
   *) script_self="$(pwd)/$script_self" ;;
 esac
 if [ "$script_self" != "$SCRIPT_INSTALL_PATH" ]; then
-  if is_root && [ -f "$script_self" ] && [ -r "$script_self" ]; then
-    if mkdir -p "$(dirname "$SCRIPT_INSTALL_PATH")" 2>/dev/null; then
-      bootstrap_tmp="${SCRIPT_INSTALL_PATH}.new.$$"
-      if cp "$script_self" "$bootstrap_tmp" 2>/dev/null && sh -n "$bootstrap_tmp" >/dev/null 2>&1 && chmod 755 "$bootstrap_tmp" 2>/dev/null && mv -f "$bootstrap_tmp" "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
-        info "安装管理脚本到：$SCRIPT_INSTALL_PATH"
-        exec "$SCRIPT_INSTALL_PATH" "$@"
-      fi
-      rm -f "$bootstrap_tmp"
-      warn "无法将管理脚本安装到 $SCRIPT_INSTALL_PATH，将继续运行当前副本；菜单中的自更新可能只更新当前文件。"
+  if ! is_root; then
+    warn "建议在 root 终端运行，以便将管理脚本安装到 $SCRIPT_INSTALL_PATH；安装组件和系统服务需要 root 权限。"
+  elif [ -e "$SCRIPT_INSTALL_PATH" ] && ! grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
+    warn "$SCRIPT_INSTALL_PATH 已存在且不像本安装脚本。为避免覆盖其他程序，不会覆盖它；当前脚本仍可继续运行。"
+  else
+    bootstrap_tmp="${SCRIPT_INSTALL_PATH}.new.$$"
+    bootstrap_ok=no
+    if [ -f "$script_self" ] && [ -r "$script_self" ]; then
+      if cp "$script_self" "$bootstrap_tmp" 2>/dev/null && valid_installer_script "$bootstrap_tmp"; then bootstrap_ok=yes; fi
     else
-      warn "无法创建脚本安装目录，将继续运行当前副本。"
+      # When launched as `curl ... | sh`, $0 is the shell, not a script file.
+      # Fetch a verified persistent copy so future self-updates have a real target.
+      download_tool
+      if [ "$DL_TOOL" != none ]; then
+        bootstrap_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
+        if [ -n "$DEFAULT_MIRROR" ]; then
+          download_file "${DEFAULT_MIRROR%/}/$bootstrap_url" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
+          valid_installer_script "$bootstrap_tmp" || rm -f "$bootstrap_tmp"
+        fi
+        if [ ! -s "$bootstrap_tmp" ]; then
+          download_file "$bootstrap_url" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
+        fi
+        if valid_installer_script "$bootstrap_tmp"; then bootstrap_ok=yes; fi
+      fi
     fi
-  elif ! is_root; then
-    warn "建议使用 root 运行，以便将管理脚本安装到 $SCRIPT_INSTALL_PATH；否则自更新不会固定到系统路径。"
+    if [ "$bootstrap_ok" = yes ] && chmod 755 "$bootstrap_tmp" 2>/dev/null && mv -f "$bootstrap_tmp" "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
+      info "安装管理脚本到：$SCRIPT_INSTALL_PATH"
+      exec "$SCRIPT_INSTALL_PATH" "$@"
+    fi
+    rm -f "$bootstrap_tmp"
+    warn "无法将管理脚本安装到 $SCRIPT_INSTALL_PATH，将继续运行当前副本；请使用下载到文件的方式运行以便重试。"
   fi
 fi
 
