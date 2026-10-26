@@ -18,6 +18,22 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 wget -O /tmp/easytier.sh "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/heads/main/easytier.sh" && sh /tmp/easytier.sh
 ```
 
+#### 国内网络访问方式
+
+如果设备访问 GitHub Raw 较慢或失败，可以尝试通过镜像下载管理脚本：
+
+```sh
+wget -O /tmp/easytier.sh "https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh" && sh /tmp/easytier.sh
+```
+
+也可以使用 `curl`：
+
+```sh
+curl -fsSL "https://cdn.jsdmirror.cn/gh/jhbook/easytier-installer@main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
+```
+
+镜像服务的可用性可能变化；若下载失败，请改用 GitHub 原始地址或其他可信镜像。注意，管理脚本下载地址与 EasyTier 核心下载源不同：安装器会优先尝试 Gitee 上的 EasyTier Release，再尝试配置的 GitHub 镜像，最后回退 GitHub 官方 Release。
+
 首次以 root 运行时，脚本会尝试将管理脚本安装到 `/usr/bin/et`。安装成功后，之后输入以下命令即可打开菜单：
 
 ```sh
@@ -194,7 +210,3 @@ logread -e easytier
 - [EasyTier 官方 GitHub 仓库](https://github.com/EasyTier/EasyTier)
 - [EasyTier 官方文档](https://easytier.cn/)
 - [EasyTier 配置文件文档](https://easytier.cn/guide/network/config-file.html)
-
-## 许可
-
-请根据本仓库实际发布的源代码、脚本和所包含组件确认并补充许可证信息。本文档不单独声明未经确认的许可证。
