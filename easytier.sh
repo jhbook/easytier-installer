@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.1"
+SCRIPT_VERSION="0.4.2"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -746,16 +746,15 @@ download_settings() {
   case "$x" in y|Y|yes|YES)
     download_tool
     [ "$DL_TOOL" != none ] || { warn "缺少 curl/wget"; return; }
-    mirror_test_stamp="$(date +%s 2>/dev/null || echo 0)"
     mirror_test_file="${TMPDIR:-/tmp}/easytier-mirror-test.$$"
     if [ -n "$MIRROR" ]; then
       # Test an actual Raw file through the configured mirror. Do not test GitHub API:
       # general-purpose download mirrors commonly do not proxy API endpoints.
-      mirror_test_url="${MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}?_=${mirror_test_stamp}"
+      mirror_test_url="${MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
       mirror_test_label="通用镜像"
     else
       # With no mirror configured, test the official Raw endpoint instead.
-      mirror_test_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}?_=${mirror_test_stamp}"
+      mirror_test_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
       mirror_test_label="GitHub 官方 Raw 源"
     fi
     rm -f "$mirror_test_file"
@@ -817,10 +816,6 @@ update_script() {
   tmp="${target}.new.$$"
   official_script_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
   cdn_script_url="https://jsd.onmicrosoft.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-  # Add a timestamp query to each request to avoid stale CDN/proxy cache entries.
-  cache_bust="$(date +%s 2>/dev/null || echo 0)"
-  cdn_script_url="${cdn_script_url}?_=${cache_bust}"
-  official_script_url="${official_script_url}?_=${cache_bust}"
   rm -f "$tmp"
 
   # Order: jsDelivr mirror -> configured general GitHub mirror -> official Raw.
@@ -830,7 +825,7 @@ update_script() {
   else
     rm -f "$tmp"
     if [ -n "${MIRROR:-}" ]; then
-      mirror_script_url="${MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}?_=${cache_bust}"
+      mirror_script_url="${MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
       info "[2/3] 通过配置的 GitHub 镜像更新安装脚本：$mirror_script_url"
       if download_file "$mirror_script_url" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
         info "配置的镜像下载完成，脚本身份和语法检查通过。"
@@ -1064,15 +1059,12 @@ if [ "$script_self" != "$SCRIPT_INSTALL_PATH" ]; then
       if [ "$DL_TOOL" != none ]; then
         bootstrap_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
         bootstrap_cdn_url="https://jsd.onmicrosoft.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-        bootstrap_cache_bust="$(date +%s 2>/dev/null || echo 0)"
-        bootstrap_url="${bootstrap_url}?_=${bootstrap_cache_bust}"
-        bootstrap_cdn_url="${bootstrap_cdn_url}?_=${bootstrap_cache_bust}"
         # For pipe launches, first fetch a persistent copy from jsDelivr, then
         # the configured mirror, and finally GitHub Raw. Validate each result.
         download_file "$bootstrap_cdn_url" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
         valid_installer_script "$bootstrap_tmp" || rm -f "$bootstrap_tmp"
         if [ ! -s "$bootstrap_tmp" ] && [ -n "$DEFAULT_MIRROR" ]; then
-          download_file "${DEFAULT_MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}?_=${bootstrap_cache_bust}" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
+          download_file "${DEFAULT_MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
           valid_installer_script "$bootstrap_tmp" || rm -f "$bootstrap_tmp"
         fi
         if [ ! -s "$bootstrap_tmp" ]; then
