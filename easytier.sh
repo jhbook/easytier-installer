@@ -13,7 +13,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.5.0"
+SCRIPT_VERSION="0.5.1"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -110,9 +110,6 @@ load_settings() {
   LAN_FORWARD_ADDED=""
   # Inbound policy a reused zone had before this script changed it to ACCEPT.
   LAN_FORWARD_INPUT_PREV=""
-  # Extra LAN subnets this node advertises into the EasyTier network. It becomes
-  # the core's --proxy-networks, and empty means "proxy nothing".
-  PROXY_NETWORKS=""
   # Legacy key from <= 0.4.4, kept only so old settings files still parse.
   API_HOST=""
   USERNAME="$DEFAULT_USER"
@@ -140,7 +137,6 @@ load_settings() {
   : "${LAN_FORWARD_ZONE:=}"
   : "${LAN_FORWARD_ADDED:=}"
   : "${LAN_FORWARD_INPUT_PREV:=}"
-  : "${PROXY_NETWORKS:=}"
   : "${USERNAME:=$DEFAULT_USER}"
   : "${RUN_MODE:=$DEFAULT_MODE}"
   : "${REMOTE_URL:=$DEFAULT_REMOTE_URL}"
@@ -177,7 +173,6 @@ save_settings() {
     printf 'LAN_FORWARD_ZONE=%s\n' "$(shell_quote "$LAN_FORWARD_ZONE")"
     printf 'LAN_FORWARD_ADDED=%s\n' "$(shell_quote "$LAN_FORWARD_ADDED")"
     printf 'LAN_FORWARD_INPUT_PREV=%s\n' "$(shell_quote "$LAN_FORWARD_INPUT_PREV")"
-    printf 'PROXY_NETWORKS=%s\n' "$(shell_quote "$PROXY_NETWORKS")"
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
     printf 'RUN_MODE=%s\n' "$(shell_quote "$RUN_MODE")"
     printf 'REMOTE_URL=%s\n' "$(shell_quote "$REMOTE_URL")"
@@ -535,7 +530,6 @@ write_runtime_env() {
     printf 'NODE_PORT=%s\n' "$(shell_quote "$NODE_PORT")"
     printf 'WEB_API_HOST=%s\n' "$(shell_quote "$WEB_API_HOST")"
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
-    printf 'PROXY_NETWORKS=%s\n' "$(shell_quote "$PROXY_NETWORKS")"
   } > "$env_tmp" || { rm -f "$env_tmp"; die "写入运行环境文件失败。"; }
   chmod 600 "$env_tmp" 2>/dev/null || :
   mv "$env_tmp" "$CONF/runtime.env" || { rm -f "$env_tmp"; die "更新运行环境文件失败。"; }
@@ -683,38 +677,24 @@ case "$RUN_MODE" in
       echo "Web 管理端未在 ${WEB_PORT}/tcp 上监听。" >&2
       exit 1
     fi
-    # --proxy-networks publishes the LANs behind this device to the whole
-    # EasyTier network. An empty value is omitted entirely instead of being
-    # passed as an empty argument.
-    if [ -n "${PROXY_NETWORKS:-}" ]; then
-      set -- --config-server "udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}" \
-        --listeners "$NODE_PORT" --proxy-networks "$PROXY_NETWORKS"
-    else
-      set -- --config-server "udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}" \
-        --listeners "$NODE_PORT"
-    fi
+    # Subnet proxying is configured in exactly one place per mode: the Web UI
+    # for local/remote Web modes, and config.toml for the local TOML mode. This
+    # script therefore passes no such flag, so the two can never disagree.
+    set -- --config-server "udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}" \
+      --listeners "$NODE_PORT"
     "$CORE" "$@" &
     CORE_PID=$!
     ;;
   config-file)
     [ -f "$DATA/config.toml" ] || { echo "缺少配置文件：$DATA/config.toml" >&2; exit 1; }
+    # [[proxy_network]] entries in config.toml are the only source here.
     set -- -c "$DATA/config.toml"
-    # Verified on device: a menu value is *added* to whatever config.toml
-    # already lists under [[proxy_network]] (the core merges the flag into the
-    # loaded config), so both sets stay announced. An empty value passes
-    # nothing at all and leaves the file's own list untouched.
-    if [ -n "${PROXY_NETWORKS:-}" ]; then
-      set -- "$@" --proxy-networks "$PROXY_NETWORKS"
-    fi
     "$CORE" "$@" &
     CORE_PID=$!
     ;;
   remote-web)
     [ -n "$REMOTE_URL" ] || { echo "未设置远程 Web 配置服务器地址" >&2; exit 1; }
     set -- -w "$REMOTE_URL"
-    if [ -n "${PROXY_NETWORKS:-}" ]; then
-      set -- "$@" --proxy-networks "$PROXY_NETWORKS"
-    fi
     "$CORE" "$@" &
     CORE_PID=$!
     ;;
@@ -1375,8 +1355,7 @@ edit_ports() {
   say "2. 修改 Web/API 端口（当前：$WEB_PORT）"
   say "3. 修改配置服务器端口（当前：$CONFIG_PORT/UDP）"
   say "4. 修改 Web API 访问地址（当前：${WEB_API_HOST:-未设置}）"
-  say "5. 修改子网代理网段（当前：${PROXY_NETWORKS:-未设置}）"
-  say "6. 局域网转发开关（当前：$(lan_forward_state)）"
+  say "5. 局域网转发开关（当前：$(lan_forward_state)）"
   printf '选择：'; read -r c || c=""
   case "$c" in
     1|2|3|4)
@@ -1385,7 +1364,7 @@ edit_ports() {
       # default mode and users land here expecting to change something.
       if [ "$RUN_MODE" != "local-web" ]; then
         warn "端口与 Web 地址只在“本地 Web 管理端”模式下使用；当前模式：$(mode_label "$RUN_MODE")。"
-        say "  本地 TOML 模式的端口请在配置文件里设置（主菜单 8 可编辑）。"
+        say "  本地 TOML 模式的端口请在配置文件里设置（菜单 9 的选项 1 可编辑）。"
         say "  远程 Web 模式的参数由远程控制台管理。"
         return 0
       fi
@@ -1427,21 +1406,6 @@ edit_ports() {
       fi
       ;;
     5)
-      say "子网代理让 EasyTier 网络里的其它节点可以访问本机后面的局域网。"
-      say "可填多个网段（逗号分隔）；输入 - 清空，直接回车保持当前值。"
-      say "这里填的网段会与配置文件里已有的 [[proxy_network]] 合并，不会被覆盖。"
-      printf '子网代理网段 [%s]: ' "${PROXY_NETWORKS:-无}"
-      read -r x || x=""
-      if [ "$x" = "-" ]; then
-        PROXY_NETWORKS=""
-      elif [ -n "$x" ]; then
-        case "$x" in
-          *[!0-9a-fA-F:.,/]*) warn "网段格式看起来不对（示例：192.168.6.0/24）。"; return 1 ;;
-        esac
-        PROXY_NETWORKS="$x"
-      fi
-      ;;
-    6)
       if ! fw4_available; then
         warn "当前不是 OpenWrt fw4 防火墙，无法在这里开关局域网转发。"
         return 0
@@ -1534,7 +1498,6 @@ show_status() {
   fi
   [ -n "${REMOTE_URL:-}" ] && say "远程配置服务器：$REMOTE_URL"
   say "用户名：$USERNAME"
-  [ -n "${PROXY_NETWORKS:-}" ] && say "子网代理网段：$PROXY_NETWORKS"
   show_lan_forward
   show_network_status
 }
@@ -1863,7 +1826,7 @@ menu() {
     say "5. 重启服务"
     say "6. 查看运行状态"
     say "7. 查看日志"
-    say "8. 修改运行参数（端口 / Web API 地址 / 子网代理 / 局域网转发）"
+    say "8. 修改运行参数（端口 / Web API 地址 / 局域网转发）"
     say "9. 更多配置（编辑 TOML / 远程 Web / 下载源 / 更新管理脚本）"
     say "10. 卸载 EasyTier（可保留 et 管理脚本）"
     say "0. 退出"
