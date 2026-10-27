@@ -12,13 +12,16 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.7"
+SCRIPT_VERSION="0.4.8"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
 CONF="/etc/easytier-installer"
 SETTINGS="$CONF/settings"
 CORE="$BIN/easytier-core"
+# easytier-cli talks to the running core's local RPC portal. It is what turns the
+# status view from a bare "running" into the actual peer topology.
+CLI="$BIN/easytier-cli"
 WEB="$BIN/easytier-web-embed"
 SERVICE_NAME="easytier"
 DEFAULT_WEB_PORT="11211"
@@ -34,15 +37,34 @@ DEFAULT_TUN_DEV="tun0"
 LAN_ZONE_NAME="easytier"
 TMPDIR_ET=""
 
+# ---------- colours ----------
+# Colourise only when a terminal is attached and the user has not opted out
+# (NO_COLOR is the de-facto standard), so logs and pipes stay plain text.
+if { [ -t 1 ] || [ -t 2 ]; } && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+  C_RESET="$(printf '\033[0m')"
+  C_BOLD="$(printf '\033[1m')"
+  C_RED="$(printf '\033[31m')"
+  C_GREEN="$(printf '\033[32m')"
+  C_YELLOW="$(printf '\033[33m')"
+  C_CYAN="$(printf '\033[36m')"
+else
+  C_RESET=""
+  C_BOLD=""
+  C_RED=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_CYAN=""
+fi
+
 # ---------- helpers ----------
 cleanup_temp() {
   if [ -n "${TMPDIR_ET:-}" ] && [ -d "$TMPDIR_ET" ]; then rm -rf "$TMPDIR_ET"; fi
 }
 trap 'cleanup_temp' EXIT
 say()  { printf '%s\n' "$*"; }
-info() { printf '[信息] %s\n' "$*"; }
-warn() { printf '[提示] %s\n' "$*" >&2; }
-die()  { printf '[错误] %s\n' "$*" >&2; exit 1; }
+info() { printf '%s[信息]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%s[提示]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+die()  { printf '%s[错误]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 # Always read menu input from the controlling terminal when one exists. This lets
 # interactive mode work even when the script itself was supplied through a pipe.
@@ -52,7 +74,7 @@ read() {
   else command read "$@"
   fi
 }
-pause() { printf '\n按回车键继续...'; read -r _dummy || :; }
+pause() { printf '\n%s按回车键继续...%s' "$C_BOLD" "$C_RESET"; read -r _dummy || :; }
 # Report the complete EasyTier installation directory footprint, including
 # binaries, configuration, databases and runtime data where stored under BASE.
 easytier_dir_size() {
@@ -84,6 +106,8 @@ load_settings() {
   # back exactly those changes instead of guessing.
   LAN_FORWARD_ZONE=""
   LAN_FORWARD_ADDED=""
+  # Inbound policy a reused zone had before this script changed it to ACCEPT.
+  LAN_FORWARD_INPUT_PREV=""
   # Legacy key from <= 0.4.4, kept only so old settings files still parse.
   API_HOST=""
   USERNAME="$DEFAULT_USER"
@@ -101,6 +125,7 @@ load_settings() {
   : "${TUN_DEV:=$DEFAULT_TUN_DEV}"
   : "${LAN_FORWARD_ZONE:=}"
   : "${LAN_FORWARD_ADDED:=}"
+  : "${LAN_FORWARD_INPUT_PREV:=}"
   : "${USERNAME:=$DEFAULT_USER}"
   : "${RUN_MODE:=$DEFAULT_MODE}"
   : "${REMOTE_URL:=$DEFAULT_REMOTE_URL}"
@@ -136,6 +161,7 @@ save_settings() {
     printf 'TUN_DEV=%s\n' "$(shell_quote "$TUN_DEV")"
     printf 'LAN_FORWARD_ZONE=%s\n' "$(shell_quote "$LAN_FORWARD_ZONE")"
     printf 'LAN_FORWARD_ADDED=%s\n' "$(shell_quote "$LAN_FORWARD_ADDED")"
+    printf 'LAN_FORWARD_INPUT_PREV=%s\n' "$(shell_quote "$LAN_FORWARD_INPUT_PREV")"
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
     printf 'RUN_MODE=%s\n' "$(shell_quote "$RUN_MODE")"
     printf 'REMOTE_URL=%s\n' "$(shell_quote "$REMOTE_URL")"
@@ -375,6 +401,7 @@ get_asset_and_extract() {
   unzip -oq "$zip" -d "$TMPDIR_ET/unpack" || die "解压失败。"
   # Official release ZIP normally contains easytier-linux-ARCH/easytier-core and easytier-web-embed.
   core_found="$(find "$TMPDIR_ET/unpack" -type f -name easytier-core 2>/dev/null | head -n 1)"
+  cli_found="$(find "$TMPDIR_ET/unpack" -type f -name easytier-cli 2>/dev/null | head -n 1)"
   web_found="$(find "$TMPDIR_ET/unpack" -type f -name easytier-web-embed 2>/dev/null | head -n 1)"
   [ -n "$core_found" ] || die "压缩包中没有 easytier-core，可能是架构不受支持或资产命名已变化。"
   mkdir_p "$BIN"
@@ -387,6 +414,19 @@ get_asset_and_extract() {
     cp "$web_found" "$WEB.new" || { rm -f "$CORE.new" "$WEB.new"; die "复制 Web 二进制失败。"; }
     chmod 755 "$WEB.new"
     "$WEB.new" --help >/dev/null 2>&1 || { rm -f "$CORE.new" "$WEB.new"; die "easytier-web-embed 无法运行，可能是 CPU/ABI 不兼容。"; }
+  fi
+  # easytier-cli is optional: it powers the status view but nothing else depends
+  # on it, so a missing or unrunnable CLI must not abort an otherwise good install.
+  cli_ready=no
+  if [ -n "$cli_found" ]; then
+    if cp "$cli_found" "$CLI.new" 2>/dev/null && chmod 755 "$CLI.new" 2>/dev/null && "$CLI.new" --help >/dev/null 2>&1; then
+      cli_ready=yes
+    else
+      rm -f "$CLI.new"
+      warn "easytier-cli 无法运行，跳过安装（不影响核心功能）。"
+    fi
+  else
+    warn "压缩包中没有 easytier-cli，状态查询将不可用（不影响核心功能）。"
   fi
   old_core="$BIN/easytier-core.old.$$"
   old_web="$BIN/easytier-web-embed.old.$$"
@@ -413,6 +453,12 @@ get_asset_and_extract() {
     fi
   else
     rm -f "$WEB"
+  fi
+  if [ "$cli_ready" = yes ]; then
+    if ! mv "$CLI.new" "$CLI"; then
+      rm -f "$CLI.new"
+      warn "替换 easytier-cli 失败，状态查询可能不可用。"
+    fi
   fi
   rm -f "$old_core" "$old_web"
   rm -rf "$TMPDIR_ET"
@@ -921,15 +967,32 @@ setup_lan_forward() {
     zone_name="$(uci -q get "firewall.$zone.name" 2>/dev/null)"
     [ -n "$zone_name" ] || zone_name="$LAN_ZONE_NAME"
     info "网卡 $TUN_DEV 已属于防火墙区域 $zone_name，直接复用。"
+    # Inbound policy matters as much as forwarding does: replies to connections
+    # the LAN side started come back through the tunnel and arrive on tun0, so a
+    # REJECT/DROP input policy answers them with TCP RST. The symptom is
+    # confusing because ping (ICMP) and the outbound request both look fine
+    # while every TCP service inside the tunnel stays unreachable.
+    prev_input="$(uci -q get "firewall.$zone.input" 2>/dev/null)"
+    case "$prev_input" in
+      REJECT|DROP)
+        uci set "firewall.$zone.input=ACCEPT"
+        LAN_FORWARD_INPUT_PREV="$prev_input"
+        info "区域 $zone_name 的入站策略原为 $prev_input，已改为 ACCEPT（保持原策略会导致隧道回程的 TCP 被复位）。"
+        ;;
+    esac
   else
     uci add firewall zone >/dev/null || { warn "无法创建防火墙区域。"; return 1; }
     zone="@zone[-1]"
     zone_name="$LAN_ZONE_NAME"
     uci set "firewall.$zone.name=$zone_name"
-    uci set "firewall.$zone.input=REJECT"
+    # ACCEPT, not REJECT: this zone carries the replies to connections started
+    # from this device or its LAN, and rejecting them breaks every TCP service
+    # in the tunnel while leaving ICMP responsive.
+    uci set "firewall.$zone.input=ACCEPT"
     uci set "firewall.$zone.output=ACCEPT"
     uci set "firewall.$zone.forward=REJECT"
     uci set "firewall.$zone.device=$TUN_DEV"
+    LAN_FORWARD_INPUT_PREV=""
     info "已创建防火墙区域 $zone_name（网卡 $TUN_DEV）。"
   fi
   uci set "firewall.$zone.masq=1"
@@ -987,12 +1050,23 @@ remove_lan_forward() {
       changed=yes
     done
   fi
+  # Put back an inbound policy that was overridden on a zone this script does not
+  # own; a zone it created is deleted above, taking its policy with it.
+  if [ -n "${LAN_FORWARD_INPUT_PREV:-}" ]; then
+    for z in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(@zone\[[0-9]*\]\)\.name=.*/\1/p'); do
+      [ "$(uci -q get "firewall.$z.name" 2>/dev/null)" = "$target" ] || continue
+      uci set "firewall.$z.input=$LAN_FORWARD_INPUT_PREV" >/dev/null 2>&1 || :
+      changed=yes
+    done
+  fi
   [ "$changed" = yes ] || return 0
   uci commit firewall >/dev/null 2>&1 || :
   /etc/init.d/firewall reload >/dev/null 2>&1 || :
   LAN_FORWARD=""
   LAN_FORWARD_ZONE=""
   LAN_FORWARD_ADDED=""
+  LAN_FORWARD_INPUT_PREV=""
+  save_settings
   info "已移除本脚本添加的防火墙转发规则。"
   return 0
 }
@@ -1005,8 +1079,38 @@ show_lan_forward() {
   zone="$(zone_with_device "$dev")"
   if [ -n "$zone" ]; then
     say "局域网转发：已启用（区域 $(uci -q get "firewall.$zone.name" 2>/dev/null)，网卡 $dev）"
+    zone_input="$(uci -q get "firewall.$zone.input" 2>/dev/null)"
+    case "$zone_input" in
+      REJECT|DROP)
+        say "隧道回程：区域入站策略为 $zone_input，隧道内的 TCP 服务会被复位（表现为只能 ping 通）。"
+        ;;
+    esac
   else
     say "局域网转发：未启用（局域网设备无法访问 EasyTier 网络）"
+  fi
+}
+show_network_status() {
+  # Without this the status view only reports "running", which hides whether any
+  # peer is actually connected; easytier-cli renders the real topology.
+  if [ ! -x "$CLI" ]; then
+    say "节点连接：未安装 easytier-cli（重新安装 EasyTier 后可用）"
+    return 0
+  fi
+  if ! service_is_active; then
+    say "节点连接：核心未运行，无法查询"
+    return 0
+  fi
+  peer_tbl="$("$CLI" peer 2>/dev/null || :)"
+  route_tbl="$("$CLI" route 2>/dev/null || :)"
+  if [ -z "$peer_tbl" ]; then
+    say "节点连接：查询失败（核心 RPC 未响应，CLI 路径 $CLI）"
+    return 0
+  fi
+  say "节点连接（本机/对端/延迟/丢包/隧道）："
+  printf '%s\n' "$peer_tbl" | sed 's/^/  /'
+  if [ -n "$route_tbl" ]; then
+    say "路由与代理网段："
+    printf '%s\n' "$route_tbl" | sed 's/^/  /'
   fi
 }
 ask_lan_forward() {
@@ -1246,6 +1350,9 @@ show_status() {
   say "安装目录：$BASE"
   say "核心：$([ -x "$CORE" ] && echo 已安装 || echo 未安装)"
   say "Web：$([ -x "$WEB" ] && echo 已安装 || echo 未安装)"
+  # Give a plain-language verdict first: the init script's own output is a bare
+  # English word ("running"), which reads as "nothing happened" to most users.
+  if service_is_active; then say "服务状态：${C_GREEN}运行中${C_RESET}"; else say "服务状态：${C_RED}未运行${C_RESET}"; fi
   if have systemctl; then systemctl --no-pager --full status easytier.service 2>/dev/null | head -n 12
   elif [ -x /etc/init.d/easytier ]; then /etc/init.d/easytier status 2>/dev/null || :
   fi
@@ -1268,6 +1375,7 @@ show_status() {
   [ -n "${REMOTE_URL:-}" ] && say "远程配置服务器：$REMOTE_URL"
   say "用户名：$USERNAME"
   show_lan_forward
+  show_network_status
 }
 show_logs() {
   if have journalctl; then journalctl -u easytier.service -n 100 --no-pager
@@ -1486,24 +1594,50 @@ set_remote_web() {
   info "已切换为远程 Web 控制模式。"
 }
 
+menu_status() {
+  # Compact health summary at the top of the menu. Without it, answering "is it
+  # actually running?" means walking into a submenu every single time.
+  load_settings
+  if service_is_active; then
+    printf '服务：%s运行中%s' "$C_GREEN" "$C_RESET"
+  else
+    printf '服务：%s未运行%s' "$C_RED" "$C_RESET"
+  fi
+  printf '    模式：%s' "$RUN_MODE"
+  # Interface and address only exist while the core is up.
+  dev="$(detect_tun_device 2>/dev/null || :)"
+  dev_ip=""
+  [ -n "$dev" ] && dev_ip="$(ip -o -4 addr show dev "$dev" 2>/dev/null | awk '{print $4}' | head -n 1)"
+  if [ -n "$dev_ip" ]; then
+    printf '    隧道：%s%s%s %s' "$C_CYAN" "$dev" "$C_RESET" "$dev_ip"
+  else
+    printf '    隧道：%s未就绪%s' "$C_YELLOW" "$C_RESET"
+  fi
+  # The peer count needs the core's RPC to answer, so only ask while it runs.
+  if [ -x "$CLI" ] && service_is_active; then
+    n="$("$CLI" peer 2>/dev/null | wc -l | tr -d ' ')"
+    case "$n" in
+      ''|*[!0-9]*) : ;;
+      *) [ "$n" -gt 1 ] && printf '    节点：%s%s%s' "$C_GREEN" "$((n - 1))" "$C_RESET" ;;
+    esac
+  fi
+  printf '\n'
+  if [ "$RUN_MODE" = "local-web" ] && [ -x "$WEB" ]; then
+    printf 'Web 管理端：%shttp://%s:%s%s\n' "$C_CYAN" "${WEB_API_HOST:-$(detect_lan_ip)}" "$WEB_PORT" "$C_RESET"
+  fi
+  show_lan_forward
+}
 menu() {
   while :; do
     load_settings
     clear 2>/dev/null || :
-    say "=============================================="
-    say "       EasyTier 跨平台安装管理工具"
-    say "=============================================="
-    say "脚本版本：v$SCRIPT_VERSION"
-    say "系统：$(detect_os)    架构：$(detect_arch)"
-    say "模式：$RUN_MODE    核心：$([ -x "$CORE" ] && echo 已安装 || echo 未安装)    Web：$([ -x "$WEB" ] && echo 已安装 || echo 未安装)"
-    say "EasyTier 目录占用：$(easytier_dir_size)（$BASE）"
-    if [ "$RUN_MODE" = "local-web" ] && [ -x "$WEB" ]; then
-      say "Web 端口：$WEB_PORT    配置服务端口：$CONFIG_PORT/UDP"
-    else
-      say "Web 端口：未配置    配置服务端口：未配置"
-    fi
+    say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
+    say "${C_BOLD}${C_CYAN}      EasyTier 跨平台安装管理工具  v$SCRIPT_VERSION${C_RESET}"
+    say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
+    menu_status
+    say "系统：$(detect_os)    架构：$(detect_arch)    目录占用：$(easytier_dir_size)"
     say "下载源：Gitee Release → ${MIRROR:-配置的 GitHub 镜像（未设置则跳过）} → GitHub 官方源"
-    say "----------------------------------------------"
+    say "${C_CYAN}----------------------------------------------${C_RESET}"
     say "1. 安装 EasyTier（选择本地 Web / 本地配置 / 远程 Web）"
     say "2. 更新 EasyTier 核心/组件"
     say "3. 更新安装脚本（自己的 GitHub 仓库）"
