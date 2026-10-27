@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.8"
+SCRIPT_VERSION="0.4.9"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -1215,20 +1215,25 @@ install_all() {
 }
 
 restart_service() {
-  load_settings
-  validate_start_config || return 1
-  os="$(detect_os)"
-  case "$os" in
-    systemd) systemctl restart easytier.service ;;
-    openwrt|openrc|sysv) /etc/init.d/easytier restart ;;
-    *) warn "当前系统没有可识别的服务管理器，请运行 $CONF/run.sh";;
-  esac
+  # Reuse the menu action so "restart" behaves the same everywhere.
+  service_action restart
 }
 service_action() {
   need_root
   action="$1"; os="$(detect_os)"
   load_settings
   case "$action" in start|restart) validate_start_config || return 1 ;; esac
+  # A restart of a service that has no running instance makes procd answer its
+  # internal `ubus call service delete` with "Command failed: ... (Not found)",
+  # which reads like a failure even though the start that follows succeeds.
+  # There is nothing to stop in that state, so start it (and enable it) instead.
+  if [ "$action" = restart ] && ! service_is_active; then
+    info "服务当前未运行，直接启动。"
+    action=start
+  elif [ "$action" = stop ] && ! service_is_active; then
+    info "服务当前未运行，无需停止。"
+    return 0
+  fi
   case "$os" in
     systemd)
       if [ "$action" = start ]; then systemctl enable easytier.service >/dev/null 2>&1 || :; fi
