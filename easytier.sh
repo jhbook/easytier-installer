@@ -2,7 +2,8 @@
 # EasyTier cross-platform installer/manager
 # Supports OpenWrt/ImmortalWrt (procd), systemd, OpenRC and SysV/BusyBox init.
 # Supports local Web, local TOML config, and remote Web control modes.
-# Copyright (c) OpenAI. Review before running on production systems.
+# https://github.com/jhbook/easytier-installer
+# Review before running on production systems.
 
 set -u
 
@@ -12,7 +13,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.9"
+SCRIPT_VERSION="0.5.0"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -90,7 +91,6 @@ easytier_dir_size() {
 is_root() { [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; }
 valid_port() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null; }
 mkdir_p() { mkdir -p "$1" 2>/dev/null || die "无法创建目录：$1"; }
-url_encode_slashless() { printf '%s' "$1" | sed 's/ /%20/g'; }
 
 load_settings() {
   WEB_PORT="$DEFAULT_WEB_PORT"
@@ -110,6 +110,9 @@ load_settings() {
   LAN_FORWARD_ADDED=""
   # Inbound policy a reused zone had before this script changed it to ACCEPT.
   LAN_FORWARD_INPUT_PREV=""
+  # Extra LAN subnets this node advertises into the EasyTier network. It becomes
+  # the core's --proxy-networks, and empty means "proxy nothing".
+  PROXY_NETWORKS=""
   # Legacy key from <= 0.4.4, kept only so old settings files still parse.
   API_HOST=""
   USERNAME="$DEFAULT_USER"
@@ -117,7 +120,16 @@ load_settings() {
   REMOTE_URL="$DEFAULT_REMOTE_URL"
   MIRROR="$DEFAULT_MIRROR"
   VERSION="latest"
-  [ -f "$SETTINGS" ] && . "$SETTINGS"
+  if [ -f "$SETTINGS" ]; then
+    # A truncated or half-written settings file makes `.` abort the whole script
+    # without a single message, which is the hardest failure to diagnose.
+    # Validate it first and fall back to the defaults set above.
+    if sh -n "$SETTINGS" >/dev/null 2>&1; then
+      . "$SETTINGS"
+    else
+      warn "设置文件内容异常，已改用默认值（原文件保留）：$SETTINGS"
+    fi
+  fi
   # Avoid empty values from old/malformed settings.
   : "${WEB_PORT:=$DEFAULT_WEB_PORT}"
   : "${CONFIG_PORT:=$DEFAULT_CONFIG_PORT}"
@@ -128,6 +140,7 @@ load_settings() {
   : "${LAN_FORWARD_ZONE:=}"
   : "${LAN_FORWARD_ADDED:=}"
   : "${LAN_FORWARD_INPUT_PREV:=}"
+  : "${PROXY_NETWORKS:=}"
   : "${USERNAME:=$DEFAULT_USER}"
   : "${RUN_MODE:=$DEFAULT_MODE}"
   : "${REMOTE_URL:=$DEFAULT_REMOTE_URL}"
@@ -164,6 +177,7 @@ save_settings() {
     printf 'LAN_FORWARD_ZONE=%s\n' "$(shell_quote "$LAN_FORWARD_ZONE")"
     printf 'LAN_FORWARD_ADDED=%s\n' "$(shell_quote "$LAN_FORWARD_ADDED")"
     printf 'LAN_FORWARD_INPUT_PREV=%s\n' "$(shell_quote "$LAN_FORWARD_INPUT_PREV")"
+    printf 'PROXY_NETWORKS=%s\n' "$(shell_quote "$PROXY_NETWORKS")"
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
     printf 'RUN_MODE=%s\n' "$(shell_quote "$RUN_MODE")"
     printf 'REMOTE_URL=%s\n' "$(shell_quote "$REMOTE_URL")"
@@ -193,7 +207,7 @@ detect_lan_ip() {
   fi
 }
 detect_os() {
-  if [ -f /etc/openwrt_release ] || grep -qi 'openwrt\|immortalwrt' /etc/os-release 2>/dev/null; then
+  if [ -f /etc/openwrt_release ] || grep -qiE 'openwrt|immortalwrt' /etc/os-release 2>/dev/null; then
     echo openwrt
   elif [ -f /etc/alpine-release ]; then
     echo openrc
@@ -240,7 +254,7 @@ valid_installer_script() {
   candidate="$1"
   [ -s "$candidate" ] || return 1
   sh -n "$candidate" >/dev/null 2>&1 || return 1
-  grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$candidate" 2>/dev/null
+  grep -qE 'EasyTier 跨平台安装管理工具|EasyTier cross-platform installer' "$candidate" 2>/dev/null
 }
 fetch_text() {
   url="$1"
@@ -521,6 +535,7 @@ write_runtime_env() {
     printf 'NODE_PORT=%s\n' "$(shell_quote "$NODE_PORT")"
     printf 'WEB_API_HOST=%s\n' "$(shell_quote "$WEB_API_HOST")"
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
+    printf 'PROXY_NETWORKS=%s\n' "$(shell_quote "$PROXY_NETWORKS")"
   } > "$env_tmp" || { rm -f "$env_tmp"; die "写入运行环境文件失败。"; }
   chmod 600 "$env_tmp" 2>/dev/null || :
   mv "$env_tmp" "$CONF/runtime.env" || { rm -f "$env_tmp"; die "更新运行环境文件失败。"; }
@@ -544,6 +559,9 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+  # save_settings ran under umask 077, so set the unit mode explicitly instead of
+  # leaving a world-inaccessible file behind.
+  chmod 644 /etc/systemd/system/easytier.service 2>/dev/null || :
   systemctl daemon-reload >/dev/null 2>&1 || :
   systemctl enable easytier.service >/dev/null 2>&1 || :
 }
@@ -566,6 +584,10 @@ start_service() {
   procd_set_param command $CONF/run.sh
   procd_set_param respawn 3600 5 5
   procd_set_param file $procd_files
+  # Hand the core's own output to syslog. Without this procd drops it, and
+  # "查看日志" on OpenWrt has nothing to show but its own restart messages.
+  procd_set_param stdout 1
+  procd_set_param stderr 1
   procd_close_instance
 }
 EOF
@@ -601,7 +623,8 @@ case "${1:-}" in
   start) /etc/easytier-installer/run.sh >/dev/null 2>&1 & echo $! > /run/easytier-wrapper.pid ;;
   stop) [ -f /run/easytier-wrapper.pid ] && kill "$(cat /run/easytier-wrapper.pid)" 2>/dev/null; rm -f /run/easytier-wrapper.pid ;;
   restart) "$0" stop; sleep 1; "$0" start ;;
-  *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+  status) if [ -f /run/easytier-wrapper.pid ] && kill -0 "$(cat /run/easytier-wrapper.pid 2>/dev/null)" 2>/dev/null; then echo running; exit 0; else echo stopped; exit 3; fi ;;
+  *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
 esac
 EOF
   chmod 755 /etc/init.d/easytier
@@ -660,17 +683,37 @@ case "$RUN_MODE" in
       echo "Web 管理端未在 ${WEB_PORT}/tcp 上监听。" >&2
       exit 1
     fi
-    "$CORE" --config-server "udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}" --listeners "$NODE_PORT" &
+    # --proxy-networks publishes the LANs behind this device to the whole
+    # EasyTier network. An empty value is omitted entirely instead of being
+    # passed as an empty argument.
+    if [ -n "${PROXY_NETWORKS:-}" ]; then
+      set -- --config-server "udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}" \
+        --listeners "$NODE_PORT" --proxy-networks "$PROXY_NETWORKS"
+    else
+      set -- --config-server "udp://127.0.0.1:${CONFIG_PORT}/${USERNAME}" \
+        --listeners "$NODE_PORT"
+    fi
+    "$CORE" "$@" &
     CORE_PID=$!
     ;;
   config-file)
     [ -f "$DATA/config.toml" ] || { echo "缺少配置文件：$DATA/config.toml" >&2; exit 1; }
-    "$CORE" -c "$DATA/config.toml" &
+    set -- -c "$DATA/config.toml"
+    # A value set from the menu must win over whatever the TOML says, and the
+    # CLI flag overrides the config file, so pass it through in every mode.
+    if [ -n "${PROXY_NETWORKS:-}" ]; then
+      set -- "$@" --proxy-networks "$PROXY_NETWORKS"
+    fi
+    "$CORE" "$@" &
     CORE_PID=$!
     ;;
   remote-web)
     [ -n "$REMOTE_URL" ] || { echo "未设置远程 Web 配置服务器地址" >&2; exit 1; }
-    "$CORE" -w "$REMOTE_URL" &
+    set -- -w "$REMOTE_URL"
+    if [ -n "${PROXY_NETWORKS:-}" ]; then
+      set -- "$@" --proxy-networks "$PROXY_NETWORKS"
+    fi
+    "$CORE" "$@" &
     CORE_PID=$!
     ;;
   *) echo "未知运行模式：$RUN_MODE" >&2; exit 1 ;;
@@ -719,13 +762,32 @@ addr_is_local() {
   have ip || return 0
   ip -o -4 addr show 2>/dev/null | grep -q "[[:space:]]$1/"
 }
+normalize_api_host() {
+  # People paste all sorts of things here: "http://192.168.1.40", "192.168.1.40/",
+  # even "192.168.1.40:11211". The Web UI needs a bare host, because the script
+  # builds "http://$WEB_API_HOST:$WEB_PORT" itself, so strip the extras instead
+  # of producing "http://http://192.168.1.40:11211".
+  nh="$1"
+  nh="${nh#http://}"
+  nh="${nh#https://}"
+  nh="${nh%%/*}"
+  case "$nh" in
+    \[*\]*) nh="${nh%%]*}]" ;;
+    *:*) nh="${nh%%:*}" ;;
+  esac
+  printf '%s' "$nh"
+}
 verify_web_http() {
   # Ask the running Web server for its own page and for the API address it
   # advertises. A page that loads while advertising another host is exactly the
   # failure users report as "installed successfully but the page does not open",
   # so both checks must pass before the installation is called successful.
   [ "$RUN_MODE" = "local-web" ] || return 0
-  port_is_listening "$WEB_PORT" tcp || return 1
+  if ports_observable; then
+    port_is_listening "$WEB_PORT" tcp || return 1
+  else
+    say "（缺少 netstat/ss，跳过端口监听检查）"
+  fi
   if ! have curl; then
     say "（未检测到 curl，跳过 Web 页面 HTTP 自检）"
     return 0
@@ -749,8 +811,16 @@ verify_web_http() {
   esac
   return 0
 }
+ports_observable() {
+  # Distinguish "nothing is listening" from "cannot tell". Minimal OpenWrt
+  # images ship neither netstat nor ss, and treating that as "not listening"
+  # would fail an installation that is actually running fine.
+  have netstat || have ss
+}
 port_is_listening() {
   # $1 = port, $2 = tcp|udp. True when something already listens on it.
+  # Callers must check ports_observable first: this reports false when no tool
+  # exists to answer the question.
   pl_port="$1"; pl_kind="${2:-tcp}"
   if have netstat; then
     if [ "$pl_kind" = udp ]; then netstat -lnu 2>/dev/null; else netstat -ltn 2>/dev/null; fi | grep -qE "[:.]${pl_port}[[:space:]]"
@@ -807,7 +877,12 @@ wait_service_up() {
   while [ "$i" -lt 20 ]; do
     if service_is_active; then
       case "$RUN_MODE" in
-        local-web) port_is_listening "$WEB_PORT" tcp && return 0 ;;
+        local-web)
+          # Without a port tool there is nothing left to verify: the service
+          # manager already reported the unit as active.
+          ports_observable || return 0
+          port_is_listening "$WEB_PORT" tcp && return 0
+          ;;
         *) return 0 ;;
       esac
     fi
@@ -840,7 +915,7 @@ dump_service_logs() {
   # visible even on systems without logread, journalctl or timeout.
   if [ -x "$CONF/run.sh" ]; then
     say "--- 直接运行 $CONF/run.sh 的输出（最多 8 秒）---"
-    dl_out="/tmp/.easytier-run.$$"
+    dl_out="${TMPDIR:-/tmp}/.easytier-run.$$"
     "$CONF/run.sh" > "$dl_out" 2>&1 &
     dl_pid=$!
     dl_i=0
@@ -886,13 +961,22 @@ install_service() {
     openwrt|openrc|sysv) /etc/init.d/easytier stop >/dev/null 2>&1 || : ;;
   esac
   kill_leftover_stack
-  if [ "$RUN_MODE" = "local-web" ]; then
+  if [ "$RUN_MODE" = "local-web" ] && ports_observable; then
+    # procd's stop is asynchronous and the previous generation can hold the port
+    # for a moment. Blaming "another program" immediately would turn a normal
+    # switch into a confusing hard failure, so retry briefly first.
+    pi=0
+    while [ "$pi" -lt 5 ] && port_is_listening "$WEB_PORT" tcp; do
+      pi=$((pi+1))
+      sleep 1
+    done
     if port_is_listening "$WEB_PORT" tcp; then
-      warn "TCP 端口 $WEB_PORT 已被其它程序占用，Web 管理端无法启动。请释放该端口或换一个端口后重试。"
+      warn "TCP 端口 $WEB_PORT 仍被占用（可能是上一代 EasyTier 进程未退干净，也可能是其它程序）。"
+      say "  请用 netstat -ltnp 确认占用者，或换一个端口后重试。"
       return 1
     fi
     if port_is_listening "$CONFIG_PORT" udp; then
-      warn "UDP 端口 $CONFIG_PORT 已被其它程序占用，配置服务器无法启动。请释放该端口或换一个端口后重试。"
+      warn "UDP 端口 $CONFIG_PORT 仍被占用（同上）。请确认后重试，或修改配置服务器端口。"
       return 1
     fi
   fi
@@ -1072,6 +1156,11 @@ remove_lan_forward() {
   info "已移除本脚本添加的防火墙转发规则。"
   return 0
 }
+lan_forward_state() {
+  # One-word answer for menus: is the LAN forwarding this script manages on?
+  if ! fw4_available; then printf '不适用'; return 0; fi
+  if [ -n "$(zone_with_device "$(detect_tun_device)")" ]; then printf '已配置'; else printf '未配置'; fi
+}
 show_lan_forward() {
   if ! fw4_available; then
     say "局域网转发：不适用（当前不是 OpenWrt fw4 防火墙）"
@@ -1080,7 +1169,7 @@ show_lan_forward() {
   dev="$(detect_tun_device)"
   zone="$(zone_with_device "$dev")"
   if [ -n "$zone" ]; then
-    say "局域网转发：已启用（区域 $(uci -q get "firewall.$zone.name" 2>/dev/null)，网卡 $dev）"
+    say "局域网转发：已配置（区域 $(uci -q get "firewall.$zone.name" 2>/dev/null)，网卡 $dev；服务运行后生效）"
     zone_input="$(uci -q get "firewall.$zone.input" 2>/dev/null)"
     case "$zone_input" in
       REJECT|DROP)
@@ -1127,7 +1216,18 @@ ask_lan_forward() {
   read -r x || x=""
   case "$x" in
     y|Y|yes|YES) setup_lan_forward || warn "防火墙转发未配置成功，可重新运行安装重试。";;
-    *) info "已跳过防火墙配置。"; LAN_FORWARD=""; save_settings;;
+    *)
+      # Answering "no" must not leave rules this script added earlier in place,
+      # otherwise the user declines the feature and it keeps working anyway.
+      if [ -n "${LAN_FORWARD_ZONE:-}" ]; then
+        info "已跳过防火墙配置；检测到本脚本以前添加的转发规则，一并撤销。"
+        remove_lan_forward
+      else
+        info "已跳过防火墙配置。"
+        LAN_FORWARD=""
+        save_settings
+      fi
+      ;;
   esac
   return 0
 }
@@ -1170,6 +1270,8 @@ install_all() {
     printf 'Web API 访问地址 [%s]: ' "${WEB_API_HOST:-$api_suggest}"
     read -r x || x=""
     [ -n "$x" ] && WEB_API_HOST="$x"
+    [ -n "$WEB_API_HOST" ] || WEB_API_HOST="$api_suggest"
+    WEB_API_HOST="$(normalize_api_host "$WEB_API_HOST")"
     [ -n "$WEB_API_HOST" ] || WEB_API_HOST="$api_suggest"
     if ! addr_is_local "$WEB_API_HOST"; then
       warn "地址 $WEB_API_HOST 不是本机接口地址，浏览器可能无法打开 Web 页面。"
@@ -1220,9 +1322,19 @@ restart_service() {
 }
 service_action() {
   need_root
-  action="$1"; os="$(detect_os)"
+  action="${1:-}"; os="$(detect_os)"
+  [ -n "$action" ] || { warn "内部错误：缺少服务动作参数。"; return 1; }
   load_settings
-  case "$action" in start|restart) validate_start_config || return 1 ;; esac
+  case "$action" in
+    start|restart)
+      validate_start_config || return 1
+      # Regenerate the runtime files before every start. After the script itself
+      # was updated, runtime.env and run.sh would otherwise keep the layout of
+      # the previous version and silently ignore any newly added setting.
+      write_runtime_env
+      write_runner
+      ;;
+  esac
   # A restart of a service that has no running instance makes procd answer its
   # internal `ubus call service delete` with "Command failed: ... (Not found)",
   # which reads like a failure even though the start that follows succeeds.
@@ -1257,30 +1369,35 @@ service_action() {
 edit_ports() {
   need_root
   load_settings
-  if [ "$RUN_MODE" != "local-web" ]; then
-    warn "当前运行模式为 $RUN_MODE，不使用本地 Web/配置服务器端口设置。请在对应模式的 TOML 配置或远程控制端修改参数。"
-    return 0
-  fi
   say "1. 修改 EasyTier 节点监听端口（当前：$NODE_PORT）"
   say "2. 修改 Web/API 端口（当前：$WEB_PORT）"
   say "3. 修改配置服务器端口（当前：$CONFIG_PORT/UDP）"
   say "4. 修改 Web API 访问地址（当前：${WEB_API_HOST:-未设置}）"
+  say "5. 修改子网代理网段（当前：${PROXY_NETWORKS:-未设置}）"
+  say "6. 局域网转发开关（当前：$(lan_forward_state)）"
   printf '选择：'; read -r c || c=""
+  case "$c" in
+    1|2|3|4)
+      # Ports and the Web API address only exist in local Web mode. Explaining
+      # that is better than a blanket refusal, because config-file is the
+      # default mode and users land here expecting to change something.
+      if [ "$RUN_MODE" != "local-web" ]; then
+        warn "端口与 Web 地址只在“本地 Web 管理端”模式下使用；当前模式：$(mode_label "$RUN_MODE")。"
+        say "  本地 TOML 模式的端口请在配置文件里设置（主菜单 8 可编辑）。"
+        say "  远程 Web 模式的参数由远程控制台管理。"
+        return 0
+      fi
+      ;;
+  esac
   case "$c" in
     1)
       printf '输入新的节点监听端口：'; read -r x || x=""
       valid_port "$x" || { warn "端口无效"; return; }
       NODE_PORT="$x"
-      if [ -f "$DATA/core.args" ]; then
-        awk -v p="$NODE_PORT" '
-          /^--listeners$/ { print; if (getline) { print p; next } }
-          /^--listeners=/ { print "--listeners=" p; next }
-          { print }
-        ' "$DATA/core.args" > "$DATA/core.args.tmp" && mv "$DATA/core.args.tmp" "$DATA/core.args"
-        if ! grep -q '^--listeners$\|^--listeners=' "$DATA/core.args"; then
-          printf '\n--listeners\n%s\n' "$NODE_PORT" >> "$DATA/core.args"
-        fi
-      fi
+      # The listening port reaches the core through runtime.env, which the runner
+      # reads, so save_settings below is what actually applies it. core.args only
+      # exists as a file procd watches to know when to reload, so leave it alone:
+      # rewriting it here would look meaningful while changing nothing.
       ;;
     2)
       printf '输入新的 Web/API 端口：'; read -r x || x=""
@@ -1291,9 +1408,8 @@ edit_ports() {
       printf '输入新的配置服务器 UDP 端口：'; read -r x || x=""
       valid_port "$x" || { warn "端口无效"; return; }
       CONFIG_PORT="$x"
-      if [ -f "$DATA/core.args" ]; then
-        sed "s#127.0.0.1:[0-9][0-9]*/#127.0.0.1:${CONFIG_PORT}/#" "$DATA/core.args" > "$DATA/core.args.tmp" && mv "$DATA/core.args.tmp" "$DATA/core.args"
-      fi
+      # Same as the node port above: runtime.env carries the value the runner
+      # actually passes to the core, so core.args needs no rewriting.
       ;;
     4)
       api_suggest="$(detect_lan_ip)"
@@ -1302,9 +1418,42 @@ edit_ports() {
       read -r x || x=""
       [ -n "$x" ] && WEB_API_HOST="$x"
       [ -n "$WEB_API_HOST" ] || WEB_API_HOST="$api_suggest"
+      WEB_API_HOST="$(normalize_api_host "$WEB_API_HOST")"
+      [ -n "$WEB_API_HOST" ] || WEB_API_HOST="$api_suggest"
       if ! addr_is_local "$WEB_API_HOST"; then
         warn "地址 $WEB_API_HOST 不是本机接口地址，浏览器可能无法打开 Web 页面。"
       fi
+      ;;
+    5)
+      say "子网代理让 EasyTier 网络里的其它节点可以访问本机后面的局域网。"
+      say "可填多个网段（逗号分隔）；输入 - 清空，直接回车保持当前值。"
+      say "该项以命令行参数传给核心，优先于本地 TOML 里的同名设置。"
+      printf '子网代理网段 [%s]: ' "${PROXY_NETWORKS:-无}"
+      read -r x || x=""
+      if [ "$x" = "-" ]; then
+        PROXY_NETWORKS=""
+      elif [ -n "$x" ]; then
+        case "$x" in
+          *[!0-9a-fA-F:.,/]*) warn "网段格式看起来不对（示例：192.168.6.0/24）。"; return 1 ;;
+        esac
+        PROXY_NETWORKS="$x"
+      fi
+      ;;
+    6)
+      if ! fw4_available; then
+        warn "当前不是 OpenWrt fw4 防火墙，无法在这里开关局域网转发。"
+        return 0
+      fi
+      if [ -n "$(zone_with_device "$(detect_tun_device)")" ]; then
+        printf '局域网转发当前已配置，是否关闭？[y/N] '
+        read -r x || x=""
+        case "$x" in y|Y|yes|YES) remove_lan_forward ;; *) info "保持不变。" ;; esac
+      else
+        printf '是否允许局域网设备通过本机访问 EasyTier 网络？[y/N] '
+        read -r x || x=""
+        case "$x" in y|Y|yes|YES) setup_lan_forward || warn "配置未成功，请查看上面的输出。" ;; *) info "保持不变。" ;; esac
+      fi
+      return 0
       ;;
     *) return ;;
   esac
@@ -1360,7 +1509,7 @@ show_status() {
   # Give a plain-language verdict first: the init script's own output is a bare
   # English word ("running"), which reads as "nothing happened" to most users.
   if service_is_active; then say "服务状态：${C_GREEN}运行中${C_RESET}"; else say "服务状态：${C_RED}未运行${C_RESET}"; fi
-  if have systemctl; then systemctl --no-pager --full status easytier.service 2>/dev/null | head -n 12
+  if [ "$(detect_os)" = systemd ] && have systemctl; then systemctl --no-pager --full status easytier.service 2>/dev/null | head -n 12
   elif [ -x /etc/init.d/easytier ]; then /etc/init.d/easytier status 2>/dev/null || :
   fi
   load_settings
@@ -1373,7 +1522,9 @@ show_status() {
       say "打开页面请使用上面这个地址。"
     else
       say "Web API 地址：未设置（服务启动时会使用本机检测到的地址）"
-      say "建议访问：http://$(detect_lan_ip):${WEB_PORT}"
+      lan_hint="$(detect_lan_ip)"
+      [ -n "$lan_hint" ] || lan_hint="<本机地址>"
+      say "建议访问：http://${lan_hint}:${WEB_PORT}"
     fi
   else
     say "Web/API 端口：未配置"
@@ -1381,6 +1532,7 @@ show_status() {
   fi
   [ -n "${REMOTE_URL:-}" ] && say "远程配置服务器：$REMOTE_URL"
   say "用户名：$USERNAME"
+  [ -n "${PROXY_NETWORKS:-}" ] && say "子网代理网段：$PROXY_NETWORKS"
   show_lan_forward
   show_network_status
 }
@@ -1402,7 +1554,7 @@ update_script() {
   download_tool
   if [ "$DL_TOOL" = none ]; then warn "缺少 curl/wget，无法更新安装脚本。"; return 1; fi
   SCRIPT_INSTALL_PATH="/usr/bin/et"
-  if [ -f "$SCRIPT_INSTALL_PATH" ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
+  if [ -f "$SCRIPT_INSTALL_PATH" ] && grep -qE 'EasyTier 跨平台安装管理工具|EasyTier cross-platform installer' "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
     target="$SCRIPT_INSTALL_PATH"
   else
     target="$0"
@@ -1515,10 +1667,10 @@ uninstall_all() {
 
   # Full uninstall: remove all EasyTier data/configuration and the manager itself.
   rm -rf "$BASE" "$CONF"
-  if [ -f /usr/bin/et ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' /usr/bin/et 2>/dev/null; then
+  if [ -f /usr/bin/et ] && grep -qE 'EasyTier 跨平台安装管理工具|EasyTier cross-platform installer' /usr/bin/et 2>/dev/null; then
     rm -f /usr/bin/et
   fi
-  if [ -f /usr/bin/et.bak ] && grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' /usr/bin/et.bak 2>/dev/null; then
+  if [ -f /usr/bin/et.bak ] && grep -qE 'EasyTier 跨平台安装管理工具|EasyTier cross-platform installer' /usr/bin/et.bak 2>/dev/null; then
     rm -f /usr/bin/et.bak
   fi
   rm -f /usr/bin/et.new.*
@@ -1593,24 +1745,46 @@ set_remote_web() {
   printf '远程配置服务器完整地址（例 udp://192.168.1.10:22020/admin）：'; read -r x || x=""
   case "$x" in udp://*|tcp://*|ws://*|wss://*) REMOTE_URL="$x";; *) warn "地址必须以 udp://、tcp://、ws:// 或 wss:// 开头。"; return 1;; esac
   RUN_MODE="remote-web"
-  rm -f "$WEB"
+  WEB_PORT="0"
+  CONFIG_PORT="0"
+  WEB_API_HOST=""
+  # Leaving local Web mode behind: drop the files only that mode owns, so the
+  # service definition cannot keep pointing at a stale Web launch command.
+  rm -f "$WEB" "$DATA/core.args"
   save_settings
-  write_runtime_env
-  write_runner
-  install_service
-  info "已切换为远程 Web 控制模式。"
+  if install_service; then
+    info "已切换为远程 Web 控制模式。"
+  else
+    warn "设置已保存，但服务未能成功启动，请查看上面的日志排查。"
+    return 1
+  fi
 }
 
+mode_label() {
+  # Menus speak in words; settings store internal keys.
+  case "${1:-}" in
+    local-web) printf '本地 Web 管理端' ;;
+    config-file) printf '仅核心 + 本地 TOML' ;;
+    remote-web) printf '仅核心 + 远程 Web' ;;
+    *) printf '%s' "${1:-}" ;;
+  esac
+}
 menu_status() {
   # Compact health summary at the top of the menu. Without it, answering "is it
   # actually running?" means walking into a submenu every single time.
   load_settings
   if service_is_active; then
     printf '服务：%s运行中%s' "$C_GREEN" "$C_RESET"
+  elif [ "$RUN_MODE" = "config-file" ]; then
+    # config-file installs are deliberately left stopped so that the user fills
+    # in the TOML first. Saying just "未运行" here reads as a fault, so say what
+    # to do next instead.
+    printf '服务：%s未运行%s %s（本地配置模式：先编辑 TOML，再启动服务）%s' "$C_YELLOW" "$C_RESET" "$C_YELLOW" "$C_RESET"
   else
-    printf '服务：%s未运行%s' "$C_RED" "$C_RESET"
+    # Every other mode expects a running service, so this really is abnormal.
+    printf '服务：%s未运行%s %s（异常，请查看日志排查）%s' "$C_RED" "$C_RESET" "$C_YELLOW" "$C_RESET"
   fi
-  printf '    模式：%s' "$RUN_MODE"
+  printf '    模式：%s' "$(mode_label "$RUN_MODE")"
   # Interface and address only exist while the core is up.
   dev="$(detect_tun_device 2>/dev/null || :)"
   dev_ip=""
@@ -1642,16 +1816,16 @@ menu() {
     say "${C_BOLD}${C_CYAN}      EasyTier 跨平台安装管理工具  v$SCRIPT_VERSION${C_RESET}"
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     menu_status
-    say "系统：$(detect_os)    架构：$(detect_arch)    目录占用：$(easytier_dir_size)"
-    say "下载源：Gitee Release → ${MIRROR:-配置的 GitHub 镜像（未设置则跳过）} → GitHub 官方源"
+    say "系统：$(detect_os)    架构：$(detect_arch)"
+    say "下载源镜像：${MIRROR:-未设置（仅 Gitee 与 GitHub 官方源）}"
     say "${C_CYAN}----------------------------------------------${C_RESET}"
     say "1. 安装 EasyTier（选择本地 Web / 本地配置 / 远程 Web）"
     say "2. 更新 EasyTier 核心/组件"
-    say "3. 更新安装脚本（自己的 GitHub 仓库）"
+    say "3. 更新管理脚本（从作者仓库）"
     say "4. 启动服务"
     say "5. 停止服务"
     say "6. 重启服务"
-    say "7. 修改端口 / Web API 地址"
+    say "7. 修改运行参数（端口 / Web API 地址 / 子网代理 / 局域网转发）"
     say "8. 编辑本地 TOML 配置文件"
     say "9. 设置远程 Web 配置服务器"
     say "10. 下载源 / 镜像加速设置"
@@ -1704,6 +1878,36 @@ menu() {
 }
 
 # Ensure settings path exists but do not require root merely to show help.
+if [ "${1:-}" = "--diag" ]; then
+  # One-shot, non-interactive snapshot for remote troubleshooting: everything
+  # that was previously collected by hand over ssh, in a single pasteable block.
+  # It deliberately never prints config.toml, which holds the network secret.
+  need_root
+  load_settings
+  say "EasyTier 诊断信息（脚本 v$SCRIPT_VERSION）"
+  say "时间：$(date 2>/dev/null || echo 未知)"
+  say ""
+  say "----- 运行状态 -----"
+  show_status
+  say ""
+  say "----- 服务管理器 -----"
+  case "$(detect_os)" in
+    systemd) systemctl --no-pager --full status easytier.service 2>&1 | head -n 20 || : ;;
+    openwrt|openrc|sysv) /etc/init.d/easytier status 2>&1 || : ;;
+    *) say "未识别的 init 系统" ;;
+  esac
+  say ""
+  say "----- 进程 -----"
+  if have ps; then ps w 2>/dev/null | grep -E '[e]asytier|[r]un\.sh' || say "（没有相关进程）"; fi
+  say ""
+  say "----- 最近日志 -----"
+  show_logs 2>/dev/null || :
+  exit 0
+fi
+if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ]; then
+  printf 'easytier-installer %s\n' "$SCRIPT_VERSION"
+  exit 0
+fi
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   cat <<'EOF'
 EasyTier 跨平台安装管理工具
@@ -1738,7 +1942,7 @@ esac
 if [ "$script_self" != "$SCRIPT_INSTALL_PATH" ]; then
   if ! is_root; then
     warn "建议在 root 终端运行，以便将管理脚本安装到 $SCRIPT_INSTALL_PATH；安装组件和系统服务需要 root 权限。"
-  elif [ -e "$SCRIPT_INSTALL_PATH" ] && ! grep -q 'EasyTier 跨平台安装管理工具\|EasyTier cross-platform installer' "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
+  elif [ -e "$SCRIPT_INSTALL_PATH" ] && ! grep -qE 'EasyTier 跨平台安装管理工具|EasyTier cross-platform installer' "$SCRIPT_INSTALL_PATH" 2>/dev/null; then
     warn "$SCRIPT_INSTALL_PATH 已存在且不像本安装脚本。为避免覆盖其他程序，不会覆盖它；当前脚本仍可继续运行。"
   else
     bootstrap_tmp="${SCRIPT_INSTALL_PATH}.new.$$"
