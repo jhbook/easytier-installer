@@ -13,7 +13,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.5.1"
+SCRIPT_VERSION="0.5.2"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -1469,7 +1469,7 @@ download_settings() {
 show_status() {
   say "系统类型：$(detect_os)"
   say "CPU 架构：$(detect_arch)"
-  say "安装目录：$BASE"
+  say "安装目录：$BASE（占用 $(easytier_dir_size)）"
   say "核心：$([ -x "$CORE" ] && echo 已安装 || echo 未安装)"
   say "Web：$([ -x "$WEB" ] && echo 已安装 || echo 未安装)"
   # Give a plain-language verdict first: the init script's own output is a bare
@@ -1820,7 +1820,7 @@ menu() {
     say "${C_BOLD}${C_CYAN}      EasyTier 跨平台安装管理工具  v$SCRIPT_VERSION${C_RESET}"
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     menu_status
-    say "系统：$(detect_os)    架构：$(detect_arch)"
+    say "系统：$(detect_os)    架构：$(detect_arch)    占用：$(easytier_dir_size)"
     say "下载源镜像：${MIRROR:-未设置（仅 Gitee 与 GitHub 官方源）}"
     say "${C_CYAN}----------------------------------------------${C_RESET}"
     say "1. 安装 EasyTier（选择本地 Web / 本地配置 / 远程 Web）"
