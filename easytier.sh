@@ -39,8 +39,10 @@ TMPDIR_ET=""
 
 # ---------- colours ----------
 # Colourise only when a terminal is attached and the user has not opted out
-# (NO_COLOR is the de-facto standard), so logs and pipes stay plain text.
-if { [ -t 1 ] || [ -t 2 ]; } && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+# (NO_COLOR is the de-facto standard), so logs and pipes stay plain text. An
+# unset TERM still counts as a terminal: dropbear and ttyd sessions frequently
+# export nothing at all, and they do understand ANSI escapes.
+if { [ -t 1 ] || [ -t 2 ]; } && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
   C_RESET="$(printf '\033[0m')"
   C_BOLD="$(printf '\033[1m')"
   C_RED="$(printf '\033[31m')"
