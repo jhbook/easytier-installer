@@ -1476,7 +1476,11 @@ show_status() {
   # English word ("running"), which reads as "nothing happened" to most users.
   if service_is_active; then say "服务状态：${C_GREEN}运行中${C_RESET}"; else say "服务状态：${C_RED}未运行${C_RESET}"; fi
   if [ "$(detect_os)" = systemd ] && have systemctl; then systemctl --no-pager --full status easytier.service 2>/dev/null | head -n 12
-  elif [ -x /etc/init.d/easytier ]; then /etc/init.d/easytier status 2>/dev/null || :
+  elif [ -x /etc/init.d/easytier ]; then
+    # Keep the service manager's own wording, but label and indent it so the
+    # Chinese verdict above stays the line people actually read.
+    svc_raw="$(/etc/init.d/easytier status 2>&1 || :)"
+    [ -n "$svc_raw" ] && printf '  服务管理器：%s\n' "$svc_raw"
   fi
   load_settings
   say "运行模式：$RUN_MODE"
