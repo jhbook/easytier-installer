@@ -699,8 +699,10 @@ case "$RUN_MODE" in
   config-file)
     [ -f "$DATA/config.toml" ] || { echo "缺少配置文件：$DATA/config.toml" >&2; exit 1; }
     set -- -c "$DATA/config.toml"
-    # A value set from the menu must win over whatever the TOML says, and the
-    # CLI flag overrides the config file, so pass it through in every mode.
+    # Verified on device: a menu value is *added* to whatever config.toml
+    # already lists under [[proxy_network]] (the core merges the flag into the
+    # loaded config), so both sets stay announced. An empty value passes
+    # nothing at all and leaves the file's own list untouched.
     if [ -n "${PROXY_NETWORKS:-}" ]; then
       set -- "$@" --proxy-networks "$PROXY_NETWORKS"
     fi
@@ -1427,7 +1429,7 @@ edit_ports() {
     5)
       say "子网代理让 EasyTier 网络里的其它节点可以访问本机后面的局域网。"
       say "可填多个网段（逗号分隔）；输入 - 清空，直接回车保持当前值。"
-      say "该项以命令行参数传给核心，优先于本地 TOML 里的同名设置。"
+      say "这里填的网段会与配置文件里已有的 [[proxy_network]] 合并，不会被覆盖。"
       printf '子网代理网段 [%s]: ' "${PROXY_NETWORKS:-无}"
       read -r x || x=""
       if [ "$x" = "-" ]; then
@@ -1808,6 +1810,41 @@ menu_status() {
   fi
   show_lan_forward
 }
+config_menu() {
+  while :; do
+    load_settings
+    clear 2>/dev/null || :
+    say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
+    say "${C_BOLD}${C_CYAN}              配置与维护${C_RESET}"
+    say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
+    say "运行模式：$(mode_label "$RUN_MODE")"
+    say "配置文件：$DATA/config.toml"
+    say "下载源镜像：${MIRROR:-未设置（仅 Gitee 与 GitHub 官方源）}"
+    say "管理脚本：v$SCRIPT_VERSION"
+    say "${C_CYAN}----------------------------------------------${C_RESET}"
+    say "1. 编辑本地 TOML 配置文件"
+    say "2. 设置远程 Web 配置服务器"
+    say "3. 下载源 / 镜像加速设置"
+    say "4. 更新管理脚本（从作者仓库）"
+    say "0. 返回主菜单"
+    say "=============================================="
+    printf '请选择 [0-4，默认 0]：'
+    if ! read -r choice; then
+      warn "读取菜单输入失败，返回主菜单。"
+      return 0
+    fi
+    case "$choice" in
+      # Subshells keep a failed action from terminating the manager.
+      1) (edit_local_config); pause ;;
+      2) (set_remote_web); pause ;;
+      3) (download_settings); pause ;;
+      4) update_script; [ "$?" -eq 0 ] || pause ;;
+      0|"") return 0 ;;
+      *) warn "无效选项：$choice。请输入 0-4 之间的菜单编号。"; pause ;;
+    esac
+  done
+}
+
 menu() {
   while :; do
     load_settings
@@ -1821,17 +1858,14 @@ menu() {
     say "${C_CYAN}----------------------------------------------${C_RESET}"
     say "1. 安装 EasyTier（选择本地 Web / 本地配置 / 远程 Web）"
     say "2. 更新 EasyTier 核心/组件"
-    say "3. 更新管理脚本（从作者仓库）"
-    say "4. 启动服务"
-    say "5. 停止服务"
-    say "6. 重启服务"
-    say "7. 修改运行参数（端口 / Web API 地址 / 子网代理 / 局域网转发）"
-    say "8. 编辑本地 TOML 配置文件"
-    say "9. 设置远程 Web 配置服务器"
-    say "10. 下载源 / 镜像加速设置"
-    say "11. 查看运行状态"
-    say "12. 查看日志"
-    say "13. 卸载 EasyTier（可保留 et 管理脚本）"
+    say "3. 启动服务"
+    say "4. 停止服务"
+    say "5. 重启服务"
+    say "6. 查看运行状态"
+    say "7. 查看日志"
+    say "8. 修改运行参数（端口 / Web API 地址 / 子网代理 / 局域网转发）"
+    say "9. 更多配置（编辑 TOML / 远程 Web / 下载源 / 更新管理脚本）"
+    say "10. 卸载 EasyTier（可保留 et 管理脚本）"
     say "0. 退出"
     say "=============================================="
     printf '请输入选项：'
@@ -1853,17 +1887,14 @@ menu() {
       # returns to this loop instead of terminating the interactive manager.
       1) (install_all); pause ;;
       2) (update_all); pause ;;
-      3) update_script; [ "$?" -eq 0 ] || pause ;;
-      4) (service_action start); pause ;;
-      5) (service_action stop); pause ;;
-      6) (service_action restart); pause ;;
-      7) (edit_ports); pause ;;
-      8) (edit_local_config); pause ;;
-      9) (set_remote_web); pause ;;
-      10) (download_settings); pause ;;
-      11) (show_status); pause ;;
-      12) (show_logs); pause ;;
-      13)
+      3) (service_action start); pause ;;
+      4) (service_action stop); pause ;;
+      5) (service_action restart); pause ;;
+      6) (show_status); pause ;;
+      7) (show_logs); pause ;;
+      8) (edit_ports); pause ;;
+      9) (config_menu) ;;
+      10)
         (uninstall_menu)
         # 10 means "the manager itself was uninstalled": leave the program.
         case "$?" in
@@ -1872,7 +1903,7 @@ menu() {
         esac
         ;;
       0) exit 0 ;;
-      *) warn "无效选项：$choice。请输入 0-13 之间的菜单编号。"; pause ;;
+      *) warn "无效选项：$choice。请输入 0-10 之间的菜单编号。"; pause ;;
     esac
   done
 }
