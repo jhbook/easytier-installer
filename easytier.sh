@@ -12,7 +12,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.4.6"
+SCRIPT_VERSION="0.4.7"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -28,6 +28,10 @@ DEFAULT_USER="easytier"
 DEFAULT_MODE="config-file"
 DEFAULT_REMOTE_URL=""
 DEFAULT_MIRROR="https://github.chenc.dev/"
+# OpenWrt LAN forwarding: the tunnel device EasyTier creates by default and the
+# name of the firewall zone this script owns when it has to create one.
+DEFAULT_TUN_DEV="tun0"
+LAN_ZONE_NAME="easytier"
 TMPDIR_ET=""
 
 # ---------- helpers ----------
@@ -72,6 +76,14 @@ load_settings() {
   # install time and falls back to the detected LAN address, because the bundled
   # UI otherwise advertises the official config server instead of this device.
   WEB_API_HOST=""
+  # OpenWrt only: whether LAN clients may reach the EasyTier network through
+  # this device, plus the tunnel device the firewall zone watches.
+  LAN_FORWARD=""
+  TUN_DEV="$DEFAULT_TUN_DEV"
+  # What this script actually changed in the firewall, so an uninstall can take
+  # back exactly those changes instead of guessing.
+  LAN_FORWARD_ZONE=""
+  LAN_FORWARD_ADDED=""
   # Legacy key from <= 0.4.4, kept only so old settings files still parse.
   API_HOST=""
   USERNAME="$DEFAULT_USER"
@@ -85,6 +97,10 @@ load_settings() {
   : "${CONFIG_PORT:=$DEFAULT_CONFIG_PORT}"
   : "${NODE_PORT:=$DEFAULT_NODE_PORT}"
   : "${WEB_API_HOST:=}"
+  : "${LAN_FORWARD:=}"
+  : "${TUN_DEV:=$DEFAULT_TUN_DEV}"
+  : "${LAN_FORWARD_ZONE:=}"
+  : "${LAN_FORWARD_ADDED:=}"
   : "${USERNAME:=$DEFAULT_USER}"
   : "${RUN_MODE:=$DEFAULT_MODE}"
   : "${REMOTE_URL:=$DEFAULT_REMOTE_URL}"
@@ -105,6 +121,9 @@ shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 save_settings() {
+  # Guard against callers that never loaded settings: under `set -u` an unset
+  # variable would otherwise blank every key in the file on disk.
+  [ -n "${RUN_MODE:-}" ] || load_settings
   mkdir_p "$CONF"
   umask 077
   settings_tmp="$SETTINGS.tmp.$$"
@@ -113,6 +132,10 @@ save_settings() {
     printf 'CONFIG_PORT=%s\n' "$(shell_quote "$CONFIG_PORT")"
     printf 'NODE_PORT=%s\n' "$(shell_quote "$NODE_PORT")"
     printf 'WEB_API_HOST=%s\n' "$(shell_quote "$WEB_API_HOST")"
+    printf 'LAN_FORWARD=%s\n' "$(shell_quote "$LAN_FORWARD")"
+    printf 'TUN_DEV=%s\n' "$(shell_quote "$TUN_DEV")"
+    printf 'LAN_FORWARD_ZONE=%s\n' "$(shell_quote "$LAN_FORWARD_ZONE")"
+    printf 'LAN_FORWARD_ADDED=%s\n' "$(shell_quote "$LAN_FORWARD_ADDED")"
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
     printf 'RUN_MODE=%s\n' "$(shell_quote "$RUN_MODE")"
     printf 'REMOTE_URL=%s\n' "$(shell_quote "$REMOTE_URL")"
@@ -844,6 +867,165 @@ install_service() {
   dump_service_logs
   return 1
 }
+# ---------- OpenWrt: let LAN clients reach the EasyTier network ----------
+fw4_available() {
+  # Only fw4 (OpenWrt 21.02+) is supported: it generates the nftables rules and
+  # keeps the zone/forwarding model the functions below edit.
+  [ -f /etc/config/firewall ] || return 1
+  have uci || return 1
+  have nft || return 1
+  return 0
+}
+detect_tun_device() {
+  # The recorded name wins: in config-file mode the service is not started yet,
+  # so the interface does not exist and scanning would find nothing at all.
+  if [ -n "${TUN_DEV:-}" ]; then printf '%s' "$TUN_DEV"; return 0; fi
+  dev=""
+  if have ip; then
+    dev="$(ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \([^:@]*\)[:@].*/\1/p' | grep -E '^(tun|utun|easytier|et)[0-9]*$' | head -n 1)"
+  fi
+  [ -n "$dev" ] || dev="$DEFAULT_TUN_DEV"
+  printf '%s' "$dev"
+}
+zone_with_device() {
+  # Return the uci section (@zone[N]) that already owns this device, if any.
+  uci show firewall 2>/dev/null | grep '\.device=' | grep -F "'$1'" \
+    | sed -n 's/^firewall\.\(@zone\[[0-9]*\]\).*/\1/p' | head -n 1
+}
+forwarding_exists() {
+  for f in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(@forwarding\[[0-9]*\]\)\.src=.*/\1/p'); do
+    [ "$(uci -q get "firewall.$f.src" 2>/dev/null)" = "$1" ] || continue
+    [ "$(uci -q get "firewall.$f.dest" 2>/dev/null)" = "$2" ] || continue
+    return 0
+  done
+  return 1
+}
+setup_lan_forward() {
+  # Turn this device into a gateway into the tunnel. Traffic from the LAN has
+  # to be allowed (fw4's default forward policy is REJECT, which answers ICMP
+  # port-unreachable and looks like "EasyTier is not running") and it has to be
+  # masqueraded, otherwise the remote peer has no route back to the LAN.
+  need_root
+  load_settings
+  if ! fw4_available; then
+    warn "未检测到 OpenWrt fw4 防火墙（需要 /etc/config/firewall、uci 与 nft），跳过局域网转发配置。"
+    return 1
+  fi
+  TUN_DEV="$(detect_tun_device)"
+  say "EasyTier 虚拟网卡：$TUN_DEV"
+
+  # Reuse a zone that already owns the device (created by hand or by an earlier
+  # run) instead of stacking a second zone onto the same interface.
+  zone="$(zone_with_device "$TUN_DEV")"
+  if [ -n "$zone" ]; then
+    zone_name="$(uci -q get "firewall.$zone.name" 2>/dev/null)"
+    [ -n "$zone_name" ] || zone_name="$LAN_ZONE_NAME"
+    info "网卡 $TUN_DEV 已属于防火墙区域 $zone_name，直接复用。"
+  else
+    uci add firewall zone >/dev/null || { warn "无法创建防火墙区域。"; return 1; }
+    zone="@zone[-1]"
+    zone_name="$LAN_ZONE_NAME"
+    uci set "firewall.$zone.name=$zone_name"
+    uci set "firewall.$zone.input=REJECT"
+    uci set "firewall.$zone.output=ACCEPT"
+    uci set "firewall.$zone.forward=REJECT"
+    uci set "firewall.$zone.device=$TUN_DEV"
+    info "已创建防火墙区域 $zone_name（网卡 $TUN_DEV）。"
+  fi
+  uci set "firewall.$zone.masq=1"
+  uci set "firewall.$zone.mtu_fix=1"
+
+  fwd_added=no
+  if forwarding_exists lan "$zone_name"; then
+    info "局域网到区域 $zone_name 的转发规则已存在。"
+  else
+    uci add firewall forwarding >/dev/null || { warn "无法创建转发规则。"; return 1; }
+    uci set "firewall.@forwarding[-1].src=lan"
+    uci set "firewall.@forwarding[-1].dest=$zone_name"
+    info "已允许局域网转发到区域 $zone_name。"
+    fwd_added=yes
+  fi
+
+  uci commit firewall || { warn "写入 /etc/config/firewall 失败。"; return 1; }
+  /etc/init.d/firewall reload >/dev/null 2>&1 || { warn "重载防火墙失败，请检查 /etc/config/firewall。"; return 1; }
+  sleep 2
+
+  if have nft && nft list ruleset 2>/dev/null | grep -q "$TUN_DEV"; then
+    info "局域网转发已生效，局域网设备现在可以访问 EasyTier 网络。"
+  else
+    warn "防火墙已重载，但规则中没有出现 $TUN_DEV；若 EasyTier 使用了别的网卡名，请重新运行本项配置。"
+  fi
+  LAN_FORWARD="yes"
+  # Remember exactly what was changed: the zone that now owns the tunnel device
+  # and whether the forwarding rule was added here or already existed.
+  LAN_FORWARD_ZONE="$zone_name"
+  LAN_FORWARD_ADDED="$fwd_added"
+  save_settings
+  return 0
+}
+remove_lan_forward() {
+  # Take back exactly what this script added: the zone it created and the
+  # forwarding rule it created. A zone the user made by hand stays, and a
+  # forwarding rule that already existed before the install is left alone.
+  fw4_available || return 0
+  load_settings
+  # Settings written by an older version record no zone, so fall back to the
+  # script's own zone name.
+  target="${LAN_FORWARD_ZONE:-$LAN_ZONE_NAME}"
+  changed=no
+  for z in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(@zone\[[0-9]*\]\)\.name=.*/\1/p'); do
+    [ "$(uci -q get "firewall.$z.name" 2>/dev/null)" = "$LAN_ZONE_NAME" ] || continue
+    uci delete "firewall.$z" >/dev/null 2>&1 || :
+    changed=yes
+  done
+  # LAN_FORWARD_ADDED=no means the rule predates this install; keep it.
+  if [ "$LAN_FORWARD_ADDED" != no ]; then
+    for f in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(@forwarding\[[0-9]*\]\)\.dest=.*/\1/p'); do
+      [ "$(uci -q get "firewall.$f.dest" 2>/dev/null)" = "$target" ] || continue
+      [ "$(uci -q get "firewall.$f.src" 2>/dev/null)" = lan ] || continue
+      uci delete "firewall.$f" >/dev/null 2>&1 || :
+      changed=yes
+    done
+  fi
+  [ "$changed" = yes ] || return 0
+  uci commit firewall >/dev/null 2>&1 || :
+  /etc/init.d/firewall reload >/dev/null 2>&1 || :
+  LAN_FORWARD=""
+  LAN_FORWARD_ZONE=""
+  LAN_FORWARD_ADDED=""
+  info "已移除本脚本添加的防火墙转发规则。"
+  return 0
+}
+show_lan_forward() {
+  if ! fw4_available; then
+    say "局域网转发：不适用（当前不是 OpenWrt fw4 防火墙）"
+    return 0
+  fi
+  dev="$(detect_tun_device)"
+  zone="$(zone_with_device "$dev")"
+  if [ -n "$zone" ]; then
+    say "局域网转发：已启用（区域 $(uci -q get "firewall.$zone.name" 2>/dev/null)，网卡 $dev）"
+  else
+    say "局域网转发：未启用（局域网设备无法访问 EasyTier 网络）"
+  fi
+}
+ask_lan_forward() {
+  # Run at the end of an install: without this, packets coming from the LAN are
+  # dropped by fw4's default forward policy, so the tunnel looks broken even
+  # though EasyTier itself is running fine.
+  fw4_available || return 0
+  load_settings
+  say ""
+  say "提示：局域网设备默认不能访问 EasyTier 网络（转发会被防火墙拒绝）。"
+  printf '是否允许局域网设备通过本机访问 EasyTier 网络？[y/N] '
+  read -r x || x=""
+  case "$x" in
+    y|Y|yes|YES) setup_lan_forward || warn "防火墙转发未配置成功，可重新运行安装重试。";;
+    *) info "已跳过防火墙配置。"; LAN_FORWARD=""; save_settings;;
+  esac
+  return 0
+}
+
 install_all() {
   need_root
   ensure_tools
@@ -922,6 +1104,7 @@ install_all() {
     config-file) say "运行模式：仅核心 + 本地配置文件"; say "配置文件：$DATA/config.toml"; say "服务已保持停止且未设置开机自启。请先编辑配置文件，完成后回到菜单选择 4 启动服务。" ;;
     remote-web) say "运行模式：仅核心 + 远程 Web 控制台"; say "远程配置服务器：$REMOTE_URL" ;;
   esac
+  ask_lan_forward
   say "日志：systemd 可用 journalctl -u easytier -f；OpenWrt 可用 logread -e easytier。"
 }
 
@@ -1084,6 +1267,7 @@ show_status() {
   fi
   [ -n "${REMOTE_URL:-}" ] && say "远程配置服务器：$REMOTE_URL"
   say "用户名：$USERNAME"
+  show_lan_forward
 }
 show_logs() {
   if have journalctl; then journalctl -u easytier.service -n 100 --no-pager
@@ -1201,6 +1385,9 @@ remove_service_definition() {
   # Runtime launch files are regenerated on every install; drop them here so no
   # stale run.sh can still be executed by hand after a removal.
   rm -f "$CONF/run.sh" "$CONF/runtime.env"
+  # The tunnel device is gone, so any forwarding rule this script added is dead
+  # weight; a zone the user created by hand is left untouched.
+  remove_lan_forward
 }
 uninstall_all() {
   need_root

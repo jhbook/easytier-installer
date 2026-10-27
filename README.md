@@ -58,6 +58,7 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 - 修改本地 Web 模式的端口与 Web API 地址。
 - 设置下载镜像，并按多个来源尝试获取 EasyTier Release。
 - 从指定 GitHub 仓库更新本管理脚本，替换前检查脚本身份和 Shell 语法。
+- 在 OpenWrt / ImmortalWrt（fw4 防火墙）上安装时可顺便开启局域网转发与 NAT，让局域网设备访问 EasyTier 网络。
 - 卸载程序和服务，可选择保留或删除数据。
 
 ## 安装模式
@@ -103,7 +104,7 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 | 8 | 编辑本地 TOML 配置文件 |
 | 9 | 设置远程 Web 配置服务器 |
 | 10 | 设置下载源 / 镜像加速 |
-| 11–12 | 查看运行状态、日志 |
+| 11–12 | 查看运行状态（含局域网转发状态）、日志 |
 | 13 | 卸载 EasyTier（二级菜单：保留 `et` 管理脚本 / 全部卸载） |
 | 0 | 退出 |
 
@@ -186,6 +187,18 @@ logread -e easytier
 
 实际服务名称和日志位置可能随系统环境而异。
 
+## 局域网转发（OpenWrt / ImmortalWrt）
+
+在 OpenWrt / ImmortalWrt（fw4 防火墙）上安装完成后，脚本会询问是否允许局域网设备访问 EasyTier 网络：
+
+- 选择“是”时，脚本会为 EasyTier 的虚拟网卡准备防火墙区域、开启 NAT（masquerade）并添加“局域网 → 该区域”的转发规则。不这样做时，局域网设备的流量会被 fw4 的默认转发策略拒绝，表现为 ping 不通或提示“无法连到端口”，看起来像 EasyTier 没有运行。
+- 虚拟网卡已经属于某个防火墙区域时会直接复用该区域，不会重复叠加区域；重复执行保持幂等。
+- 配置写入 `/etc/config/firewall` 并立即重载，重启后依然有效。非 fw4 防火墙会自动跳过本项。
+
+菜单 11「查看运行状态」会显示当前是否已启用局域网转发。
+
+卸载时脚本只撤销自己添加的内容：脚本创建的区域会被删除；由你手工创建的防火墙区域会保留，原本就存在的转发规则也不会被删除。
+
 ## 卸载说明
 
 菜单 13 会进入卸载二级菜单，先显示核心、Web 管理端、配置目录与数据目录的当前状态，再选择：
@@ -229,6 +242,16 @@ logread -e easytier
 3. GitHub 官方 Raw：`https://raw.githubusercontent.com/jhbook/easytier-installer/main/easytier.sh`。
 
 前一个来源下载失败或校验不通过时才会继续尝试下一个来源。下载地址不追加时间戳查询参数，以兼容不支持额外查询参数的镜像/CDN；脚本通过校验下载内容来判断是否可用。
+
+## 版本说明（v0.4.7）
+
+- 新增安装时的局域网转发配置：在 OpenWrt / ImmortalWrt（fw4）上可选择让局域网设备访问 EasyTier 网络，脚本会准备防火墙区域、开启 NAT 并添加转发规则。
+- 虚拟网卡已在用的防火墙区域会被复用，不会重复创建区域或转发规则；重复执行保持幂等。
+- 配置写入 `/etc/config/firewall` 并立即重载，重启后依然有效；不支持的防火墙（非 fw4）自动跳过。
+- 菜单 11「查看运行状态」新增局域网转发状态显示。
+- 卸载时会撤销脚本添加的防火墙配置：删除脚本创建的区域与转发规则，手工创建的区域和原本就存在的转发规则保持不变。
+- 设置文件新增 `LAN_FORWARD`、`TUN_DEV`、`LAN_FORWARD_ZONE`、`LAN_FORWARD_ADDED` 四个键，记录脚本究竟改动了什么，便于卸载时精确回滚。
+- 修复保存设置时若调用方尚未加载设置会把整个设置文件写空的问题：`save_settings` 现在会先补齐默认值。
 
 ## 版本说明（v0.4.6）
 
