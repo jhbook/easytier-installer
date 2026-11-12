@@ -46,6 +46,7 @@ DEFAULT_MIRROR="https://github.chenc.dev/"
 # copied https://ghproxy.com/ prefix was dropped because it now returns an HTML
 # page with HTTP 200, which only the ZIP integrity check would catch.
 DL_SOURCES='gitee|Gitee 官方源|https://gitee.com/easytier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
+jhbook|jhbook 镜像|https://git.jhbook.eu.org/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
 ghfast|GHFast 镜像|https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
 ghproxy|GHProxy 镜像|https://gh-proxy.com/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
 github|GitHub 官方源|https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip'
