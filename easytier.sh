@@ -310,12 +310,16 @@ dl_latest_url() {
   printf '%s' "$1" | sed 's|/releases/download/[^/]*/.*|/releases/latest|'
 }
 # Read the tag out of a followed redirect. HEAD only, so no page body is fetched.
+# Two shapes are handled, because "releases/latest" does not land on the same URL
+# everywhere:
+#   https://github.com/<repo>/releases/tag/v2.6.4                     GitHub, and mirrors that proxy it
+#   https://gitee.com/<repo>/repository/blazearchive/v2.6.4.zip?...   Gitee
 redirect_tag() {
   case "$DL_TOOL" in
     curl) curl -sI -o /dev/null -w '%{url_effective}' -L --connect-timeout 6 --max-time 15 "$1" 2>/dev/null ;;
     wget) wget -S -qO /dev/null -T 15 -t 1 "$1" 2>&1 | sed -n 's|.*Location: ||p' | tail -n 1 ;;
     *) return 1 ;;
-  esac | sed -n 's|.*/releases/tag/||p' | sed 's|[/?].*||'
+  esac | sed -n -e 's|.*/releases/tag/\([^/?]*\).*|\1|p' -e 's|.*/blazearchive/\([^/?]*\)\.zip.*|\1|p'
 }
 latest_version() {
   # Resolving the newest tag is metadata, not a package transfer, and the user is
@@ -329,8 +333,9 @@ latest_version() {
   # then wasted a second request for the same reason.
   v=""
   # 1) Ask the source the user actually picked, so the tag and the package come
-  #    from the same place. Mirrors proxy the releases/latest redirect (verified
-  #    on ghfast, gh-proxy and jhbook).
+  #    from the same place. This works for GitHub and the mirrors that proxy it,
+  #    and for Gitee through its blazearchive redirect; only gh-proxy answers the
+  #    HEAD without a redirect, and then the fallbacks below take over.
   if [ -n "${DL_SEL_URL:-}" ]; then
     lu="$(dl_latest_url "$DL_SEL_URL")"
     [ "$lu" != "$DL_SEL_URL" ] && v="$(redirect_tag "$lu")"

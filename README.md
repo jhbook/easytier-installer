@@ -174,7 +174,7 @@ github|GitHub 官方源|https://github.com/EasyTier/EasyTier/releases/download/$
 
 `settings` 里的 `VERSION` 记录上次装到的版本，普通安装直接复用它；只有它是 `latest`（首次安装，以及每次更新）时才会去查一次当前最新版本。查询只读标签、**不下载任何包内容**，按下面顺序尝试，命中即停：
 
-1. 你本次所选下载源自己的 `releases/latest` 重定向（例如 `https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/latest`）；
+1. 你本次所选下载源自己的 `releases/latest` 重定向（例如 `https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/latest`）。GitHub 与代理它的镜像落到 `…/releases/tag/v2.6.4`，Gitee 落到 `…/repository/blazearchive/v2.6.4.zip` —— 两种形态都能解析。实测五个源里**四个能自己回答**，只有 GHProxy 不返回重定向；
 2. Gitee 官方 API（国内通常 1 秒内返回）；
 3. GitHub API：先经菜单 9 配置的镜像，再直连（共享出口 IP 被限流时直连返回 403 属正常）；
 4. GitHub 官方 `releases/latest` 重定向兜底。
@@ -314,7 +314,7 @@ cidr = "10.200.1.0/24"
 
 - 修复「选完下载源之后卡很久」：`latest_version` 不再跟随 Gitee 的 `releases/latest`（该地址已变成重定向到一个 24MB 归档 zip，`curl -o /dev/null` 会把整包下载后丢弃，实测约 7 秒且最终解析仍然失败），改为四级快速查询：①本次所选源自己的 `releases/latest`；②Gitee API；③GitHub API（先镜像、后直连）；④GitHub 官方重定向兜底。
 - 实测对比（iStoreOS 25.12.5 / x86_64）：旧实现 14 秒且失败；新实现逐个源探测均为 1–2 秒并正确得到 `v2.6.4`，所选源不可达时 0 秒降级到 API，不会长时间卡住。
-- 探测只发 HEAD 请求读取重定向目标，不再下载任何页面正文；每步限制 6 秒连接 / 15 秒总时长。
+- 探测只发 HEAD 请求读取重定向目标，不再下载任何页面正文；每步限制 6 秒连接 / 15 秒总时长。解析规则同时覆盖 GitHub 的 `…/releases/tag/<tag>` 与 Gitee 的 `…/repository/blazearchive/<tag>.zip`，实测五个源里四个能自答（仅 GHProxy 不返回重定向）。
 - 版本查询新增长度可预期的提示「正在获取最新版本号（只查询标签，不下载内容）...」，卡顿时能看出正在进行哪一步。
 - 下载源列表加入 jhbook 镜像（`https://git.jhbook.eu.org/`，代理 GitHub release 资产），内置源增至五个，菜单序号与 README 表格同步更新。
 
