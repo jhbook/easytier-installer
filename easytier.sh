@@ -3,7 +3,7 @@
 # Supports OpenWrt/ImmortalWrt (procd), systemd, OpenRC and SysV/BusyBox init.
 # Supports local Web, local TOML config, and remote Web control modes.
 # https://github.com/jhbook/easytier-installer
-# Author: jhbook, built with AI assistance.
+# Made by jhbook & AI.
 # Review before running on production systems.
 
 set -u
@@ -14,11 +14,10 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.5.5"
-# Shown in the menu header, --version and --help. Kept as constants so the
-# attribution lives in exactly one place.
-SCRIPT_AUTHOR="jhbook"
-SCRIPT_CREDIT="AI 协助制作"
+SCRIPT_VERSION="0.5.6"
+# Shown in the menu header, --version and --help. Kept in one constant so the
+# signature is changed in a single place.
+SCRIPT_SIGNATURE="Made by jhbook & AI"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -1641,7 +1640,7 @@ update_script() {
   if [ ! -f "$target" ]; then warn "无法定位当前脚本文件：$target。请先通过下载到文件的方式运行安装脚本。"; return 1; fi
   tmp="${target}.new.$$"
   official_script_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-  cdn_script_url="https://jsd.onmicrosoft.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
+  cdn_script_url="https://cdn.jsdelivr.net/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
   rm -f "$tmp"
 
   # Order: jsDelivr mirror -> configured general GitHub mirror -> official Raw.
@@ -1929,7 +1928,7 @@ menu() {
     clear 2>/dev/null || :
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     say "${C_BOLD}${C_CYAN}      EasyTier 跨平台安装管理工具  v$SCRIPT_VERSION${C_RESET}"
-    say "${C_CYAN}      作者：${SCRIPT_AUTHOR}    ${SCRIPT_CREDIT}${C_RESET}"
+    say "${C_CYAN}      ${SCRIPT_SIGNATURE}${C_RESET}"
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     menu_status
     say "系统：$(detect_os)    架构：$(detect_arch)    占用：$(easytier_dir_size)"
@@ -2016,13 +2015,13 @@ if [ "${1:-}" = "--diag" ]; then
 fi
 if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ]; then
   printf 'easytier-installer %s\n' "$SCRIPT_VERSION"
-  printf '作者：%s（%s）\n' "$SCRIPT_AUTHOR" "$SCRIPT_CREDIT"
+  printf '%s\n' "$SCRIPT_SIGNATURE"
   exit 0
 fi
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   cat <<'EOF'
 EasyTier 跨平台安装管理工具
-作者：jhbook（AI 协助制作）
+Made by jhbook & AI
 用法：
   et                      进入交互菜单
   sh easytier.sh          进入交互菜单
@@ -2067,7 +2066,7 @@ if [ "$script_self" != "$SCRIPT_INSTALL_PATH" ]; then
       download_tool
       if [ "$DL_TOOL" != none ]; then
         bootstrap_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-        bootstrap_cdn_url="https://jsd.onmicrosoft.cn/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
+        bootstrap_cdn_url="https://cdn.jsdelivr.net/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
         # For pipe launches, first fetch a persistent copy from jsDelivr, then
         # the configured mirror, and finally GitHub Raw. Validate each result.
         download_file "$bootstrap_cdn_url" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"

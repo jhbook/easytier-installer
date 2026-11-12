@@ -2,7 +2,7 @@
 
 面向 OpenWrt、ImmortalWrt 及常见 Linux 系统的 EasyTier 交互式安装管理工具。脚本负责下载和管理 EasyTier 核心组件、选择运行模式、配置服务启动方式，并提供后续更新与卸载菜单。
 
-作者：**jhbook**　·　由 **AI 协助制作**（菜单顶部、`et --version` 与 `et --help` 均会显示）
+Made by **jhbook** & **AI**（菜单顶部、`et --version` 与 `et --help` 均会显示）
 
 > 本项目是第三方安装管理脚本，不是 EasyTier 官方项目。请在运行前检查脚本内容，并先在测试设备验证。识别到 CPU 架构不代表 EasyTier 官方一定提供相应可用的 Release 资产。
 
@@ -25,13 +25,13 @@ wget -O /tmp/easytier.sh "https://raw.githubusercontent.com/jhbook/easytier-inst
 如果设备访问 GitHub Raw 较慢或失败，可以尝试通过镜像下载管理脚本：
 
 ```sh
-wget -O /tmp/easytier.sh "https://jsd.onmicrosoft.cn/gh/jhbook/easytier-installer@main/easytier.sh" && sh /tmp/easytier.sh
+wget -O /tmp/easytier.sh "https://cdn.jsdelivr.net/gh/jhbook/easytier-installer@main/easytier.sh" && sh /tmp/easytier.sh
 ```
 
 也可以使用 `curl`：
 
 ```sh
-curl -fsSL "https://jsd.onmicrosoft.cn/gh/jhbook/easytier-installer@main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
+curl -fsSL "https://cdn.jsdelivr.net/gh/jhbook/easytier-installer@main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
 ```
 
 镜像服务的可用性可能变化；若下载失败，请改用 GitHub 原始地址或其他可信镜像。注意，管理脚本下载地址与 EasyTier 核心下载源是两回事：安装和更新核心时会单独让你选下载源，详见「下载源」一节。
@@ -309,15 +309,20 @@ cidr = "10.200.1.0/24"
 
 菜单会显示当前安装脚本版本号。菜单 9 的选项 4 更新安装脚本时，按以下顺序尝试并在每一步检查脚本身份与 Shell 语法：
 
-1. jsDelivr 镜像：`https://jsd.onmicrosoft.cn/gh/jhbook/easytier-installer@main/easytier.sh`
+1. jsDelivr 镜像：`https://cdn.jsdelivr.net/gh/jhbook/easytier-installer@main/easytier.sh`
 2. 菜单中配置的通用 GitHub 镜像（如果已配置）。
 3. GitHub 官方 Raw：`https://raw.githubusercontent.com/jhbook/easytier-installer/main/easytier.sh`。
 
 前一个来源下载失败或校验不通过时才会继续尝试下一个来源。下载地址不追加时间戳查询参数，以兼容不支持额外查询参数的镜像/CDN；脚本通过校验下载内容来判断是否可用。
 
+## 版本说明（v0.5.6）
+
+- 署名改为 `Made by jhbook & AI`，菜单顶部、`et --version`、`et --help` 三处一致。署名来自脚本顶部的 `SCRIPT_SIGNATURE` 常量，只在一处维护。
+- 管理脚本自更新用的 jsDelivr 镜像域名由 `jsd.onmicrosoft.cn` 换成官方域名 `cdn.jsdelivr.net`，README 里的安装命令同步更新。实测新域名可用（HTTP 200，约 3 秒返回脚本正文），返回内容与官方 Raw 一致。
+
 ## 版本说明（v0.5.5）
 
-- 菜单顶部、`et --version` 与 `et --help` 显示作者署名：作者 **jhbook**，**AI 协助制作**。署名来自脚本顶部的 `SCRIPT_AUTHOR` 与 `SCRIPT_CREDIT` 两个常量，只在一处维护。
+- 菜单顶部、`et --version` 与 `et --help` 显示作者署名（初版为中文「作者：jhbook，AI 协助制作」，v0.5.6 起改为 `Made by jhbook & AI`）。
 
 ## 版本说明（v0.5.4）
 
