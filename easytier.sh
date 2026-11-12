@@ -3,6 +3,7 @@
 # Supports OpenWrt/ImmortalWrt (procd), systemd, OpenRC and SysV/BusyBox init.
 # Supports local Web, local TOML config, and remote Web control modes.
 # https://github.com/jhbook/easytier-installer
+# Author: jhbook, built with AI assistance.
 # Review before running on production systems.
 
 set -u
@@ -13,7 +14,11 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.5.4"
+SCRIPT_VERSION="0.5.5"
+# Shown in the menu header, --version and --help. Kept as constants so the
+# attribution lives in exactly one place.
+SCRIPT_AUTHOR="jhbook"
+SCRIPT_CREDIT="AI 协助制作"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -1924,6 +1929,7 @@ menu() {
     clear 2>/dev/null || :
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     say "${C_BOLD}${C_CYAN}      EasyTier 跨平台安装管理工具  v$SCRIPT_VERSION${C_RESET}"
+    say "${C_CYAN}      作者：${SCRIPT_AUTHOR}    ${SCRIPT_CREDIT}${C_RESET}"
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     menu_status
     say "系统：$(detect_os)    架构：$(detect_arch)    占用：$(easytier_dir_size)"
@@ -2010,11 +2016,13 @@ if [ "${1:-}" = "--diag" ]; then
 fi
 if [ "${1:-}" = "--version" ] || [ "${1:-}" = "-V" ]; then
   printf 'easytier-installer %s\n' "$SCRIPT_VERSION"
+  printf '作者：%s（%s）\n' "$SCRIPT_AUTHOR" "$SCRIPT_CREDIT"
   exit 0
 fi
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   cat <<'EOF'
 EasyTier 跨平台安装管理工具
+作者：jhbook（AI 协助制作）
 用法：
   et                      进入交互菜单
   sh easytier.sh          进入交互菜单

@@ -2,6 +2,8 @@
 
 面向 OpenWrt、ImmortalWrt 及常见 Linux 系统的 EasyTier 交互式安装管理工具。脚本负责下载和管理 EasyTier 核心组件、选择运行模式、配置服务启动方式，并提供后续更新与卸载菜单。
 
+作者：**jhbook**　·　由 **AI 协助制作**（菜单顶部、`et --version` 与 `et --help` 均会显示）
+
 > 本项目是第三方安装管理脚本，不是 EasyTier 官方项目。请在运行前检查脚本内容，并先在测试设备验证。识别到 CPU 架构不代表 EasyTier 官方一定提供相应可用的 Release 资产。
 
 ## 快速开始
@@ -312,6 +314,10 @@ cidr = "10.200.1.0/24"
 3. GitHub 官方 Raw：`https://raw.githubusercontent.com/jhbook/easytier-installer/main/easytier.sh`。
 
 前一个来源下载失败或校验不通过时才会继续尝试下一个来源。下载地址不追加时间戳查询参数，以兼容不支持额外查询参数的镜像/CDN；脚本通过校验下载内容来判断是否可用。
+
+## 版本说明（v0.5.5）
+
+- 菜单顶部、`et --version` 与 `et --help` 显示作者署名：作者 **jhbook**，**AI 协助制作**。署名来自脚本顶部的 `SCRIPT_AUTHOR` 与 `SCRIPT_CREDIT` 两个常量，只在一处维护。
 
 ## 版本说明（v0.5.4）
 
