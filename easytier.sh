@@ -333,22 +333,35 @@ latest_version() {
   # then wasted a second request for the same reason.
   v=""
   # 1) Ask the source the user actually picked, so the tag and the package come
-  #    from the same place. This works for GitHub and the mirrors that proxy it,
-  #    and for Gitee through its blazearchive redirect; only gh-proxy answers the
-  #    HEAD without a redirect, and then the fallbacks below take over.
+  #    from the same place. GitHub and the mirrors that proxy it answer with the
+  #    usual /releases/tag/... redirect; Gitee answers with a blazearchive one.
   if [ -n "${DL_SEL_URL:-}" ]; then
     lu="$(dl_latest_url "$DL_SEL_URL")"
     [ "$lu" != "$DL_SEL_URL" ] && v="$(redirect_tag "$lu")"
   fi
-  # 2) Gitee's API answers in well under a second from inside China.
+  # 2) gh-proxy folds that redirect into a 200 response body instead of passing
+  #    the Location on, so step 1 cannot read it -- but the very same prefix does
+  #    serve api.github.com, whose JSON carries "tag_name" directly. Mirrors that
+  #    do not proxy the API answer with a non-JSON body ("Invalid input." from
+  #    ghfast, "Hello" from jhbook); json_tag then finds nothing and the chain
+  #    simply continues, so this step is harmless for them.
+  if [ -z "$v" ]; then
+    case "${DL_SEL_URL:-}" in
+      *https://github.com/*)
+        api_prefix="${DL_SEL_URL%%https://github.com/*}"
+        [ -n "$api_prefix" ] && v="$(fetch_text "${api_prefix}https://api.github.com/repos/$REPO/releases/latest" | json_tag)"
+        ;;
+    esac
+  fi
+  # 3) Gitee's API answers in well under a second from inside China.
   [ -n "$v" ] || v="$(fetch_text "https://gitee.com/api/v5/repos/easytier/EasyTier/releases/latest" | json_tag)"
-  # 3) GitHub API: through the configured mirror first, then directly. GitHub
+  # 4) GitHub API: through the configured mirror first, then directly. GitHub
   #    rate-limits shared addresses, so a 403 on the direct call is normal.
   if [ -z "$v" ] && [ -n "${MIRROR:-}" ]; then
     v="$(fetch_text "${MIRROR%/}/https://api.github.com/repos/$REPO/releases/latest" | json_tag)"
   fi
   [ -n "$v" ] || v="$(fetch_text "https://api.github.com/repos/$REPO/releases/latest" | json_tag)"
-  # 4) Last resort: the official releases/latest redirect.
+  # 5) Last resort: the official releases/latest redirect.
   [ -n "$v" ] || v="$(redirect_tag "https://github.com/$REPO/releases/latest")"
   # Validate the result before using it in asset URLs.
   case "$v" in
