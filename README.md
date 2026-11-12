@@ -58,7 +58,7 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 - 管理服务启动、停止、重启、状态和日志。
 - 编辑本地 TOML 配置、设置远程 Web 配置服务器。
 - 修改运行参数：节点端口、Web/API 端口、配置服务端口、Web API 地址、局域网转发开关。
-- 安装和更新核心时先选择下载源（Gitee / 三个 GitHub 镜像 / GitHub 官方源，或临时填写自定义地址），选定后只尝试该地址。
+- 安装和更新核心时先选择下载源（Gitee / 三个 GitHub 镜像 / GitHub 官方源，或临时填写自定义地址），选定后只尝试该地址；更新管理脚本时同样先选来源（5 个内置来源或自定义链接），失败可改选另一个。
 - 从指定 GitHub 仓库更新本管理脚本，替换前检查脚本身份和 Shell 语法。
 - 在 OpenWrt / ImmortalWrt（fw4 防火墙）上安装时可顺便开启局域网转发与 NAT，让局域网设备访问 EasyTier 网络。
 - 运行状态可直接看到已连接节点、延迟与丢包，以及本机公布的路由与代理网段。
@@ -109,7 +109,7 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 | 6 | 查看运行状态（服务 / 隧道 / 节点连接 / 局域网转发） |
 | 7 | 查看日志 |
 | 8 | 修改运行参数（端口 / Web API 地址 / 局域网转发） |
-| 9 | 更多配置（二级菜单：编辑本地 TOML / 远程 Web 配置服务器 / 镜像加速 / 更新管理脚本） |
+| 9 | 更多配置（二级菜单：编辑本地 TOML / 远程 Web 配置服务器 / 更新管理脚本） |
 | 10 | 卸载 EasyTier（二级菜单：保留 `et` 管理脚本 / 全部卸载） |
 | 0 | 退出 |
 
@@ -179,7 +179,7 @@ github|GitHub 官方源|https://github.com/EasyTier/EasyTier/releases/download/$
 1. 你本次所选下载源自己的 `releases/latest` 重定向（例如 `https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/latest`）。GitHub 与代理它的镜像落到 `…/releases/tag/v2.6.4`，Gitee 落到 `…/repository/blazearchive/v2.6.4.zip` —— 两种形态都能解析；
 2. 所选下载源的镜像前缀所代理的 `api.github.com`（即 `<前缀>https://api.github.com/repos/EasyTier/EasyTier/releases/latest`，它的 JSON 里直接带 `tag_name`）。这一步是为 GHProxy 准备的：它自己跟随重定向后返回 200 正文，不把 `Location` 透传给客户端，所以第 1 步读不到；但同一个前缀能代理 GitHub API，实测 2 秒内返回。不代理 API 的镜像（GHFast 返回 `Invalid input.`、jhbook 返回 `Hello`）在这一步取不到 `tag_name`，会自动继续下一步，对它们没有任何影响；
 3. Gitee 官方 API（国内通常 1 秒内返回）；
-4. GitHub API：先经菜单 9 配置的镜像，再直连（共享出口 IP 被限流时直连返回 403 属正常）；
+4. GitHub API 直连（共享出口 IP 被限流时返回 403 属正常，第 5 步会兜底）；
 5. GitHub 官方 `releases/latest` 重定向兜底。
 
 实测五个源都能自己回答，耗时 1–3 秒：Gitee 1 秒（第 1 步）、jhbook 1 秒（第 1 步）、GHFast 2 秒（第 1 步）、GHProxy 3 秒（第 1 步空手，第 2 步命中）、GitHub 1 秒（第 1 步）。
@@ -187,10 +187,6 @@ github|GitHub 官方源|https://github.com/EasyTier/EasyTier/releases/download/$
 每一步都有 6 秒连接 / 15 秒总时长上限，全部失败会明确报错并提示改选自定义地址。
 
 > v0.5.3 及更早用的是另一条路径：跟随 Gitee 的 `releases/latest`。Gitee 后来把这个地址重定向到一个 24MB 的归档 zip，而 `curl -o /dev/null` 会把重定向目标整个下载下来只为读最终 URL —— 实测白白花掉约 7 秒后解析仍然失败，最坏情况三级超时叠加接近 75 秒。这就是「选完源之后卡很久」的原因，v0.5.4 起已改掉。
-
-### 镜像加速（仅用于管理脚本自更新）
-
-菜单 9 的「镜像加速设置」配置的是**管理脚本自身**更新时使用的 GitHub 镜像前缀（默认为 `https://github.chenc.dev/`），与核心二进制的下载源互不影响。
 
 ## 安装脚本自更新
 
@@ -202,7 +198,24 @@ SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
 ```
 
-在菜单中选择“更新安装脚本”后，脚本会尝试使用已配置的镜像下载 Raw 文件；镜像下载失败或返回内容无效时，回退到 GitHub 官方 Raw 地址。替换前会检查文件非空、脚本标识和 `sh -n` 语法，并尝试备份旧文件为 `.bak`。 更新成功后会自动重新执行更新后的脚本，直接进入最新版菜单，无需退出再手动运行 `et`。
+菜单 9 的「更新管理脚本」会**先让你选择来源**，选定后只从该地址下载，不会自动切换到其它来源 —— 这样可以明确这次更新是从哪里取回的，某个来源失败时改选另一个即可。
+
+| 序号 | 来源 | 地址 |
+| --- | --- | --- |
+| 1 | jsDelivr CDN | `https://cdn.jsdelivr.net/gh/<repo>@<branch>/<path>` |
+| 2 | jhbook 镜像 | `https://git.jhbook.eu.org/https://raw.githubusercontent.com/<repo>/<branch>/<path>` |
+| 3 | GHFast 镜像 | `https://ghfast.top/https://raw.githubusercontent.com/<repo>/<branch>/<path>` |
+| 4 | GHProxy 镜像 | `https://gh-proxy.com/https://raw.githubusercontent.com/<repo>/<branch>/<path>` |
+| 5 | GitHub 官方源 | `https://raw.githubusercontent.com/<repo>/<branch>/<path>` |
+
+另有 `c` 选项可填写**自定义完整链接**（自建镜像或内网文件），`0` 取消本次更新。来源清单集中在脚本顶部的 `SCRIPT_SOURCES` 维护，格式与下载源一致：`id|显示名称|URL模板`，占位符为 `${repo}` `${branch}` `${path}`；两个清单共用同一个渲染函数，所以增删改来源只改这个字符串。
+
+两点实测结论：
+
+- **jsDelivr 会缓存分支引用**，刚推送新版本后它可能仍返回上一个版本。更新完成时脚本会打印「更新后版本」，如果与预期不符，改选其它来源再更新一次即可。
+- 旧的「镜像加速」设置（默认 `https://github.chenc.dev/`）已在 v0.5.7 移除：该地址实测返回 301 跳转到一个 HTML 页面而不是脚本，而自动回退恰好把这个失败掩盖了过去。
+
+替换前会检查文件非空、脚本标识和 `sh -n` 语法，并备份旧文件为 `.bak`。更新成功后会自动重新执行更新后的脚本，直接进入最新版菜单，无需退出再手动运行 `et`。
 
 持久化管理脚本路径为：
 
@@ -307,13 +320,25 @@ cidr = "10.200.1.0/24"
 
 ### 安装脚本自更新失败
 
-菜单会显示当前安装脚本版本号。菜单 9 的选项 4 更新安装脚本时，按以下顺序尝试并在每一步检查脚本身份与 Shell 语法：
+菜单会显示当前安装脚本版本号。菜单 9 的选项 3「更新管理脚本」会先列出 5 个来源让你选一个，然后**只尝试该地址**，并在替换前检查脚本身份和 `sh -n` 语法。
 
-1. jsDelivr 镜像：`https://cdn.jsdelivr.net/gh/jhbook/easytier-installer@main/easytier.sh`
-2. 菜单中配置的通用 GitHub 镜像（如果已配置）。
-3. GitHub 官方 Raw：`https://raw.githubusercontent.com/jhbook/easytier-installer/main/easytier.sh`。
+失败时的处理：
 
-前一个来源下载失败或校验不通过时才会继续尝试下一个来源。下载地址不追加时间戳查询参数，以兼容不支持额外查询参数的镜像/CDN；脚本通过校验下载内容来判断是否可用。
+1. 报错会指出具体地址与原因（下载失败 / 内容不是本脚本 / 语法检查不通过），并且**不会自动换源**；
+2. 重新执行同一项、改选另一个来源即可；
+3. 若预设来源都不通，选 `c` 填写自定义完整链接（自建镜像或内网文件）。
+
+更新成功但「更新后版本」与预期不符时，多半是 jsDelivr 的分支缓存，改选其它来源再更新一次。
+
+## 版本说明（v0.5.7）
+
+- 管理脚本自更新改为**先选择来源**：内置 5 个来源（jsDelivr CDN、jhbook 镜像、GHFast 镜像、GHProxy 镜像、GitHub 官方源），也可填写自定义完整链接。选定后只尝试该地址，不再自动多源回退；失败会指出具体地址与原因，并提示改选其它来源。
+- 来源清单集中在脚本顶部新增的 `SCRIPT_SOURCES` 维护，格式与 `DL_SOURCES` 一致（`id|显示名称|URL模板`），占位符为 `${repo}` `${branch}` `${path}`；两个清单共用同一个模板渲染函数 `tpl_render`。
+- 菜单 9 删除「镜像加速设置」入口，二级菜单由 4 项减为 3 项。
+- 移除 `MIRROR` 设置项（含写入 `settings`）：原先默认的 `https://github.chenc.dev/` 实测已失效（返回 301 跳到一个 HTML 页面而不是脚本），而自动回退把这个失败掩盖了过去；旧 `settings` 里残留的值会被显式清空，不会再被读取。
+- 更新完成时打印「更新后版本」，并在版本与更新前相同时提示可能是来源缓存（jsDelivr 缓存分支引用，实测刚推送后会滞后一个版本）。
+- 首次引导安装（`curl | sh` 场景没有终端可供选择来源）固定使用 jsDelivr 与 GitHub 官方 Raw 两条，并删除失效的默认镜像分支。
+- 主菜单与菜单 9 会分别显示内置的核心下载源数量与脚本来源数量。
 
 ## 版本说明（v0.5.6）
 

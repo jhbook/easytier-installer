@@ -14,7 +14,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.5.6"
+SCRIPT_VERSION="0.5.7"
 # Shown in the menu header, --version and --help. Kept in one constant so the
 # signature is changed in a single place.
 SCRIPT_SIGNATURE="Made by jhbook & AI"
@@ -35,7 +35,6 @@ DEFAULT_NODE_PORT="11010"
 DEFAULT_USER="easytier"
 DEFAULT_MODE="config-file"
 DEFAULT_REMOTE_URL=""
-DEFAULT_MIRROR="https://github.chenc.dev/"
 # ---------- binary download sources ----------
 # One source per line: id|display name|URL template.
 # Placeholders: ${tag} = release tag (e.g. v2.6.4), ${arch} = architecture name.
@@ -59,6 +58,27 @@ github|GitHub 官方源|https://github.com/EasyTier/EasyTier/releases/download/$
 # source instead of silently reusing a mirror that has since gone away.
 DL_SEL_TYPE=""
 DL_SEL_URL=""
+# ---------- management-script update sources ----------
+# Same shape as DL_SOURCES so both lists read the same way: one source per line,
+# id|display name|URL template. Placeholders ${repo} ${branch} ${path} are
+# expanded by the shared renderer.
+# The updater asks which source to use and then tries only that one. The old
+# behaviour (jsDelivr, then a configured mirror, then official Raw, all
+# automatically) hid failures and kept a dead prefix alive for months: the
+# previous default, https://github.chenc.dev/, now answers 301 with an HTML
+# page instead of the script.
+# Every URL below answered HTTP 200 with a real script body on-device.
+# jsDelivr caches branch references, so right after a push it can still serve
+# the previous release -- that is why it is one option among several rather
+# than the only one.
+SCRIPT_SOURCES='jsdelivr|jsDelivr CDN|https://cdn.jsdelivr.net/gh/${repo}@${branch}/${path}
+jhbook|jhbook 镜像|https://git.jhbook.eu.org/https://raw.githubusercontent.com/${repo}/${branch}/${path}
+ghfast|GHFast 镜像|https://ghfast.top/https://raw.githubusercontent.com/${repo}/${branch}/${path}
+ghproxy|GHProxy 镜像|https://gh-proxy.com/https://raw.githubusercontent.com/${repo}/${branch}/${path}
+github|GitHub 官方源|https://raw.githubusercontent.com/${repo}/${branch}/${path}'
+# Filled by render_script_source_menu for the current update only; never saved.
+SS_SEL_TYPE=""
+SS_SEL_URL=""
 # OpenWrt LAN forwarding: the tunnel device EasyTier creates by default and the
 # name of the firewall zone this script owns when it has to create one.
 DEFAULT_TUN_DEV="tun0"
@@ -142,7 +162,6 @@ load_settings() {
   USERNAME="$DEFAULT_USER"
   RUN_MODE="$DEFAULT_MODE"
   REMOTE_URL="$DEFAULT_REMOTE_URL"
-  MIRROR="$DEFAULT_MIRROR"
   VERSION="latest"
   if [ -f "$SETTINGS" ]; then
     # A truncated or half-written settings file makes `.` abort the whole script
@@ -167,7 +186,10 @@ load_settings() {
   : "${USERNAME:=$DEFAULT_USER}"
   : "${RUN_MODE:=$DEFAULT_MODE}"
   : "${REMOTE_URL:=$DEFAULT_REMOTE_URL}"
-  : "${MIRROR:=$DEFAULT_MIRROR}"
+  # MIRROR was removed in 0.5.7: the management script updates from the source
+  # the user picks, so nothing reads a stored mirror prefix any more. Blank it so
+  # a leftover value from an older settings file can never be used again.
+  MIRROR=""
   : "${VERSION:=latest}"
   # Older installs may have stored port 0 after switching away from local Web.
   # Restore sensible defaults when local Web mode is selected again.
@@ -203,7 +225,6 @@ save_settings() {
     printf 'USERNAME=%s\n' "$(shell_quote "$USERNAME")"
     printf 'RUN_MODE=%s\n' "$(shell_quote "$RUN_MODE")"
     printf 'REMOTE_URL=%s\n' "$(shell_quote "$REMOTE_URL")"
-    printf 'MIRROR=%s\n' "$(shell_quote "$MIRROR")"
     printf 'VERSION=%s\n' "$(shell_quote "$VERSION")"
   } > "$settings_tmp" || { rm -f "$settings_tmp"; die "写入设置文件失败。"; }
   chmod 600 "$settings_tmp" 2>/dev/null || :
@@ -359,11 +380,8 @@ latest_version() {
   fi
   # 3) Gitee's API answers in well under a second from inside China.
   [ -n "$v" ] || v="$(fetch_text "https://gitee.com/api/v5/repos/easytier/EasyTier/releases/latest" | json_tag)"
-  # 4) GitHub API: through the configured mirror first, then directly. GitHub
-  #    rate-limits shared addresses, so a 403 on the direct call is normal.
-  if [ -z "$v" ] && [ -n "${MIRROR:-}" ]; then
-    v="$(fetch_text "${MIRROR%/}/https://api.github.com/repos/$REPO/releases/latest" | json_tag)"
-  fi
+  # 4) GitHub API directly. GitHub rate-limits shared addresses, so a 403 here
+  #    is normal rather than a sign that the address is wrong.
   [ -n "$v" ] || v="$(fetch_text "https://api.github.com/repos/$REPO/releases/latest" | json_tag)"
   # 5) Last resort: the official releases/latest redirect.
   [ -n "$v" ] || v="$(redirect_tag "https://github.com/$REPO/releases/latest")"
@@ -381,21 +399,33 @@ latest_version() {
 # Fill a source template. sed does the substitution because ${var//pat/repl} is
 # a bashism that BusyBox ash rejects. Only the two documented placeholders are
 # replaced; everything else is copied through verbatim.
-dl_render_template() {
-  printf '%s' "$1" | sed "s|\${tag}|$2|g; s|\${arch}|$3|g"
+tpl_render() {
+  # Expands every placeholder both source lists use. ${tag} and ${arch} come from
+  # the caller because they change per release; ${repo}, ${branch} and ${path}
+  # are constants of this script. sed is used because ${var//pat/repl} is a
+  # bashism that BusyBox ash rejects; everything else is copied through verbatim.
+  printf '%s' "$1" | sed \
+    -e "s|\${tag}|$2|g" \
+    -e "s|\${arch}|$3|g" \
+    -e "s|\${repo}|${SCRIPT_REPO}|g" \
+    -e "s|\${branch}|${SCRIPT_BRANCH}|g" \
+    -e "s|\${path}|${SCRIPT_PATH}|g"
 }
 # awk reads the list instead of a `while read` loop: the read() wrapper above
 # prefers /dev/tty, so a here-document loop would read the terminal instead of
 # the list whenever the script runs on a real terminal.
-dl_source_count() {
-  printf '%s\n' "$DL_SOURCES" | awk -F'|' 'NF >= 3 {n++} END {printf "%d", n+0}'
+src_count() {
+  printf '%s\n' "$1" | awk -F'|' 'NF >= 3 {n++} END {printf "%d", n+0}'
 }
-dl_source_name() {
-  printf '%s\n' "$DL_SOURCES" | awk -F'|' -v k="$1" 'NF >= 3 {n++; if (n == k) {print $2; exit}}'
+src_field() {
+  printf '%s\n' "$1" | awk -F'|' -v k="$3" -v f="$2" 'NF >= 3 {n++; if (n == k) {print $f; exit}}'
 }
-dl_source_template() {
-  printf '%s\n' "$DL_SOURCES" | awk -F'|' -v k="$1" 'NF >= 3 {n++; if (n == k) {print $3; exit}}'
-}
+dl_source_count() { src_count "$DL_SOURCES"; }
+dl_source_name() { src_field "$DL_SOURCES" 2 "$1"; }
+dl_source_template() { src_field "$DL_SOURCES" 3 "$1"; }
+ss_count() { src_count "$SCRIPT_SOURCES"; }
+ss_name() { src_field "$SCRIPT_SOURCES" 2 "$1"; }
+ss_template() { src_field "$SCRIPT_SOURCES" 3 "$1"; }
 render_dl_source_menu() {
   # Shared by install and update. The result lives only in DL_SEL_TYPE and
   # DL_SEL_URL for this run. Returns 1 when the user cancels, so the caller can
@@ -434,6 +464,47 @@ render_dl_source_menu() {
     DL_SEL_URL="$(dl_source_template "$ans")"
     [ -n "$DL_SEL_URL" ] || { warn "读取下载源失败。"; continue; }
     info "已选择下载源：$(dl_source_name "$ans")"
+    return 0
+  done
+}
+render_script_source_menu() {
+  # Mirrors render_dl_source_menu. The result lives only in SS_SEL_TYPE and
+  # SS_SEL_URL for this run. The updater tries exactly one source, so a failure
+  # is visible and switching to another source stays a deliberate choice.
+  SS_SEL_TYPE=""
+  SS_SEL_URL=""
+  src_total="$(ss_count)"
+  while :; do
+    say ""
+    say "${C_BOLD}${C_CYAN}---------- 选择安装脚本来源 ----------${C_RESET}"
+    printf '%s\n' "$SCRIPT_SOURCES" | awk -F'|' 'NF >= 3 {printf "%d. %s\n", ++n, $2}'
+    say "c. 自定义完整链接（自建镜像或内网文件）"
+    say "0. 取消本次操作"
+    say "${C_CYAN}----------------------------------------${C_RESET}"
+    printf '请选择 [1-%s/c/0，默认 0]：' "$src_total"
+    if ! read -r ans; then warn "读取输入失败。"; return 1; fi
+    case "$ans" in
+      0|"") info "已取消。"; return 1 ;;
+      c|C)
+        say "请给出 easytier.sh 的完整下载地址。"
+        printf '地址：'; read -r custom_script_url || custom_script_url=""
+        case "$custom_script_url" in
+          http://*|https://*) ;;
+          *) warn "地址必须以 http:// 或 https:// 开头。"; continue ;;
+        esac
+        SS_SEL_TYPE="custom"
+        SS_SEL_URL="$custom_script_url"
+        return 0
+        ;;
+    esac
+    case "$ans" in *[!0-9]*) warn "无效选项：$ans。"; continue ;; esac
+    if [ "$ans" -lt 1 ] || [ "$ans" -gt "$src_total" ]; then
+      warn "序号超出范围：$ans。"; continue
+    fi
+    SS_SEL_TYPE="preset"
+    SS_SEL_URL="$(ss_template "$ans")"
+    [ -n "$SS_SEL_URL" ] || { warn "读取来源失败。"; continue; }
+    info "已选择安装脚本来源：$(ss_name "$ans")"
     return 0
   done
 }
@@ -489,7 +560,7 @@ get_asset_and_extract() {
       VERSION="$(latest_version)" || die "无法获取最新版本号。请检查网络连通性，或在下载源中选择自定义地址。"
     fi
     info "准备下载 EasyTier 版本：$VERSION"
-    url="$(dl_render_template "$sel_ref" "$VERSION" "$arch")"
+    url="$(tpl_render "$sel_ref" "$VERSION" "$arch")"
     # Official releases publish no .sha256 sidecar today (verified 404 on
     # GitHub, Gitee and every mirror), so this normally degrades to the ZIP
     # integrity check plus the --version smoke test further down. It stays
@@ -1538,42 +1609,6 @@ edit_ports() {
   fi
 }
 
-download_settings() {
-  need_root
-  load_settings
-  say "当前镜像前缀：$MIRROR"
-  say "这里配置的镜像只用于管理脚本自身的更新与连通性测试，不参与核心二进制的下载。"
-  say "核心与组件在安装（菜单 1）和更新（菜单 2）时单独选择下载源。"
-  say "镜像用于代理完整 GitHub URL，例如 https://ghfast.top/。输入 official 清空。"
-  printf '输入新的镜像前缀（回车保持，输入 official 清空）：'; read -r x || x=""
-  if [ "$x" = official ]; then MIRROR=""
-  elif [ -n "$x" ]; then MIRROR="${x%/}/"; fi
-  save_settings
-  info "下载源设置已保存。"
-  printf '测试通用镜像可访问性？[y/N] '; read -r x || x=""
-  case "$x" in y|Y|yes|YES)
-    download_tool
-    [ "$DL_TOOL" != none ] || { warn "缺少 curl/wget"; return; }
-    mirror_test_file="${TMPDIR:-/tmp}/easytier-mirror-test.$$"
-    if [ -n "$MIRROR" ]; then
-      # Test an actual Raw file through the configured mirror. Do not test GitHub API:
-      # general-purpose download mirrors commonly do not proxy API endpoints.
-      mirror_test_url="${MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-      mirror_test_label="通用镜像"
-    else
-      # With no mirror configured, test the official Raw endpoint instead.
-      mirror_test_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-      mirror_test_label="GitHub 官方 Raw 源"
-    fi
-    rm -f "$mirror_test_file"
-    if download_file "$mirror_test_url" "$mirror_test_file" >/dev/null 2>&1 && valid_installer_script "$mirror_test_file"; then
-      info "$mirror_test_label Raw 脚本下载正常。"
-    else
-      warn "$mirror_test_label Raw 脚本测试失败；请检查地址、网络或仓库文件是否可访问。"
-    fi
-    rm -f "$mirror_test_file" ;;
-  esac
-}
 show_status() {
   say "系统类型：$(detect_os)"
   say "CPU 架构：$(detect_arch)"
@@ -1639,44 +1674,42 @@ update_script() {
   fi
   if [ ! -f "$target" ]; then warn "无法定位当前脚本文件：$target。请先通过下载到文件的方式运行安装脚本。"; return 1; fi
   tmp="${target}.new.$$"
-  official_script_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-  cdn_script_url="https://cdn.jsdelivr.net/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
   rm -f "$tmp"
 
-  # Order: jsDelivr mirror -> configured general GitHub mirror -> official Raw.
-  info "[1/3] 通过 jsDelivr 镜像更新安装脚本：$cdn_script_url"
-  if download_file "$cdn_script_url" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
-    info "jsDelivr 镜像下载完成，脚本身份和语法检查通过。"
+  say "当前版本：v$SCRIPT_VERSION"
+  render_script_source_menu || { info "已取消更新。"; return 0; }
+  if [ "$SS_SEL_TYPE" = custom ]; then
+    script_url="$SS_SEL_URL"
   else
-    rm -f "$tmp"
-    if [ -n "${MIRROR:-}" ]; then
-      mirror_script_url="${MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-      info "[2/3] 通过配置的 GitHub 镜像更新安装脚本：$mirror_script_url"
-      if download_file "$mirror_script_url" "$tmp" >/dev/null 2>&1 && valid_installer_script "$tmp"; then
-        info "配置的镜像下载完成，脚本身份和语法检查通过。"
-      else
-        warn "配置的镜像下载失败或内容无效，自动回退 GitHub 官方 Raw 源。"
-        rm -f "$tmp"
-      fi
-    else
-      info "未配置通用 GitHub 镜像，跳过第二个来源。"
-    fi
+    script_url="$(tpl_render "$SS_SEL_URL" "" "")"
   fi
 
-  if [ ! -s "$tmp" ]; then
-    info "[3/3] 从 GitHub 官方 Raw 地址更新安装脚本：$official_script_url"
-    if ! download_file "$official_script_url" "$tmp" >/dev/null 2>&1 || ! valid_installer_script "$tmp"; then
-      rm -f "$tmp"
-      warn "安装脚本下载失败或内容无效。已依次尝试 jsDelivr、配置的镜像（如已配置）和 GitHub 官方 Raw。"
-      return 1
-    fi
-    info "GitHub 官方源下载完成，脚本身份和语法检查通过。"
+  # One attempt only. An automatic chain is what let a dead mirror prefix stay in
+  # the list unnoticed, and it also hid which address actually served the file;
+  # failing loudly here lets the user pick another source and try again.
+  info "正在下载安装脚本：$script_url"
+  if ! download_file "$script_url" "$tmp" >/dev/null 2>&1 || ! valid_installer_script "$tmp"; then
+    rm -f "$tmp"
+    warn "安装脚本下载失败或内容无效：$script_url"
+    say "本次只尝试了所选来源，不会自动切换到其它来源。"
+    say "请重新执行本项并改选其它来源，或选择“自定义完整链接”填写可用地址。"
+    return 1
   fi
+  info "下载完成，脚本身份和语法检查通过。"
   if ! chmod 755 "$tmp"; then rm -f "$tmp"; warn "无法设置新脚本权限。"; return 1; fi
+  new_ver="$(grep -m1 '^SCRIPT_VERSION=' "$tmp" 2>/dev/null | sed 's/^SCRIPT_VERSION=//; s/"//g')"
   cp -p "$target" "${target}.bak" 2>/dev/null || :
   if ! mv "$tmp" "$target"; then rm -f "$tmp"; warn "替换脚本失败；旧脚本仍应保留。"; return 1; fi
   info "安装管理脚本更新完成。"
   say "旧脚本备份：${target}.bak"
+  if [ -n "$new_ver" ]; then
+    if [ "$new_ver" = "$SCRIPT_VERSION" ]; then
+      say "更新后版本：v$new_ver（与更新前相同）"
+      say "若你刚发布新版本，可能是来源缓存所致（jsDelivr 会缓存分支引用），可重新执行本项并改选其它来源。"
+    else
+      say "更新后版本：v$new_ver"
+    fi
+  fi
   say "正在重新启动最新版管理菜单……"
   # Replace this process with the just-updated script so the user immediately
   # lands in the new version's menu instead of continuing in the old process.
@@ -1896,16 +1929,15 @@ config_menu() {
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     say "运行模式：$(mode_label "$RUN_MODE")"
     say "配置文件：$DATA/config.toml"
-    say "镜像加速：${MIRROR:-未设置}（仅用于管理脚本自更新）"
     say "管理脚本：v$SCRIPT_VERSION"
+    say "脚本来源：更新时选择（共 $(ss_count) 个）"
     say "${C_CYAN}----------------------------------------------${C_RESET}"
     say "1. 编辑本地 TOML 配置文件"
     say "2. 设置远程 Web 配置服务器"
-    say "3. 镜像加速设置（管理脚本自更新用）"
-    say "4. 更新管理脚本（从作者仓库）"
+    say "3. 更新管理脚本（从作者仓库）"
     say "0. 返回主菜单"
     say "=============================================="
-    printf '请选择 [0-4，默认 0]：'
+    printf '请选择 [0-3，默认 0]：'
     if ! read -r choice; then
       warn "读取菜单输入失败，返回主菜单。"
       return 0
@@ -1914,10 +1946,9 @@ config_menu() {
       # Subshells keep a failed action from terminating the manager.
       1) (edit_local_config); pause ;;
       2) (set_remote_web); pause ;;
-      3) (download_settings); pause ;;
-      4) update_script; [ "$?" -eq 0 ] || pause ;;
+      3) update_script; [ "$?" -eq 0 ] || pause ;;
       0|"") return 0 ;;
-      *) warn "无效选项：$choice。请输入 0-4 之间的菜单编号。"; pause ;;
+      *) warn "无效选项：$choice。请输入 0-3 之间的菜单编号。"; pause ;;
     esac
   done
 }
@@ -1932,7 +1963,8 @@ menu() {
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     menu_status
     say "系统：$(detect_os)    架构：$(detect_arch)    占用：$(easytier_dir_size)"
-    say "下载源：安装/更新时选择（共 $(dl_source_count) 个）"
+    say "核心下载源：安装/更新时选择（共 $(dl_source_count) 个）"
+    say "脚本来源：自更新时选择（共 $(ss_count) 个）"
     say "${C_CYAN}----------------------------------------------${C_RESET}"
     say "1. 安装 EasyTier（选择本地 Web / 本地配置 / 远程 Web）"
     say "2. 更新 EasyTier 核心/组件"
@@ -1942,7 +1974,7 @@ menu() {
     say "6. 查看运行状态"
     say "7. 查看日志"
     say "8. 修改运行参数（端口 / Web API 地址 / 局域网转发）"
-    say "9. 更多配置（编辑 TOML / 远程 Web / 镜像加速 / 更新管理脚本）"
+    say "9. 更多配置（编辑 TOML / 远程 Web / 更新管理脚本）"
     say "10. 卸载 EasyTier（可保留 et 管理脚本）"
     say "0. 退出"
     say "=============================================="
@@ -2029,7 +2061,7 @@ Made by jhbook & AI
 
 安装时需要 root 权限。安装与更新核心时会先选择下载源（源清单在脚本顶部集中维护，也可临时填写自定义完整地址）；选定后只尝试该地址，不会自动切换到其它源。
 管理命令：安装后可直接运行 et。
-脚本自更新：从菜单选择“更新安装脚本”，更新固定路径中的管理脚本。
+脚本自更新：从菜单选择“更新管理脚本”，会先选择来源再下载，只尝试所选来源；某个来源失败时可改选其它来源重试。
 首次安装默认选择轻量的“核心 + 本地 TOML 配置”模式；需要 Web 页面时可选择本地 Web 模式。仅本地 Web 模式会安装 easytier-web-embed。
 交互脚本可通过文件运行；若使用管道执行，必须有可用的控制终端。推荐先下载到文件，以便明确检查下载结果。
 EOF
@@ -2067,14 +2099,11 @@ if [ "$script_self" != "$SCRIPT_INSTALL_PATH" ]; then
       if [ "$DL_TOOL" != none ]; then
         bootstrap_url="https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}"
         bootstrap_cdn_url="https://cdn.jsdelivr.net/gh/${SCRIPT_REPO}@${SCRIPT_BRANCH}/${SCRIPT_PATH}"
-        # For pipe launches, first fetch a persistent copy from jsDelivr, then
-        # the configured mirror, and finally GitHub Raw. Validate each result.
+        # For pipe launches there is no terminal to offer a source menu, so use a
+        # fixed pair: jsDelivr first (fast in China), then GitHub Raw. Validate
+        # each result before it is used.
         download_file "$bootstrap_cdn_url" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
         valid_installer_script "$bootstrap_tmp" || rm -f "$bootstrap_tmp"
-        if [ ! -s "$bootstrap_tmp" ] && [ -n "$DEFAULT_MIRROR" ]; then
-          download_file "${DEFAULT_MIRROR%/}/https://raw.githubusercontent.com/${SCRIPT_REPO}/${SCRIPT_BRANCH}/${SCRIPT_PATH}" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
-          valid_installer_script "$bootstrap_tmp" || rm -f "$bootstrap_tmp"
-        fi
         if [ ! -s "$bootstrap_tmp" ]; then
           download_file "$bootstrap_url" "$bootstrap_tmp" >/dev/null 2>&1 || rm -f "$bootstrap_tmp"
         fi
