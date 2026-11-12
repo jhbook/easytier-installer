@@ -32,7 +32,7 @@ wget -O /tmp/easytier.sh "https://jsd.onmicrosoft.cn/gh/jhbook/easytier-installe
 curl -fsSL "https://jsd.onmicrosoft.cn/gh/jhbook/easytier-installer@main/easytier.sh" -o /tmp/easytier.sh && sh /tmp/easytier.sh
 ```
 
-镜像服务的可用性可能变化；若下载失败，请改用 GitHub 原始地址或其他可信镜像。注意，管理脚本下载地址与 EasyTier 核心下载源不同：安装器会优先尝试 Gitee 上的 EasyTier Release，再尝试配置的 GitHub 镜像，最后回退 GitHub 官方 Release。
+镜像服务的可用性可能变化；若下载失败，请改用 GitHub 原始地址或其他可信镜像。注意，管理脚本下载地址与 EasyTier 核心下载源是两回事：安装和更新核心时会单独让你选下载源，详见「下载源」一节。
 
 首次以 root 运行时，脚本会尝试将管理脚本安装到 `/usr/bin/et`。安装成功后，之后输入以下命令即可打开菜单：
 
@@ -56,7 +56,7 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 - 管理服务启动、停止、重启、状态和日志。
 - 编辑本地 TOML 配置、设置远程 Web 配置服务器。
 - 修改运行参数：节点端口、Web/API 端口、配置服务端口、Web API 地址、局域网转发开关。
-- 设置下载镜像，并按多个来源尝试获取 EasyTier Release。
+- 安装和更新核心时先选择下载源（Gitee / 两个 GitHub 镜像 / GitHub 官方源，或临时填写自定义地址），选定后只尝试该地址。
 - 从指定 GitHub 仓库更新本管理脚本，替换前检查脚本身份和 Shell 语法。
 - 在 OpenWrt / ImmortalWrt（fw4 防火墙）上安装时可顺便开启局域网转发与 NAT，让局域网设备访问 EasyTier 网络。
 - 运行状态可直接看到已连接节点、延迟与丢包，以及本机公布的路由与代理网段。
@@ -107,7 +107,7 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 | 6 | 查看运行状态（服务 / 隧道 / 节点连接 / 局域网转发） |
 | 7 | 查看日志 |
 | 8 | 修改运行参数（端口 / Web API 地址 / 局域网转发） |
-| 9 | 更多配置（二级菜单：编辑本地 TOML / 远程 Web 配置服务器 / 下载源与镜像 / 更新管理脚本） |
+| 9 | 更多配置（二级菜单：编辑本地 TOML / 远程 Web 配置服务器 / 镜像加速 / 更新管理脚本） |
 | 10 | 卸载 EasyTier（二级菜单：保留 `et` 管理脚本 / 全部卸载） |
 | 0 | 退出 |
 
@@ -128,23 +128,47 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 
 脚本包含常见架构映射，例如 `x86_64`、`aarch64`、`armv7`、`armv6`、`i686`、`mips`、`mipsel`、`mips64el`、`riscv64`。最终是否有匹配的可用二进制，以 EasyTier 官方 Release 的实际资产和设备 ABI 为准。
 
-## 下载源与镜像
+## 下载源
 
-菜单中的“下载源 / 镜像加速设置”可配置 GitHub 镜像前缀。核心 Release 下载按以下顺序尝试：
+安装（菜单 1）与更新（菜单 2）都会先让你**选择一个下载源**，选定后只从该地址下载，**不会自动切换到其它源** —— 这样能明确这次装的是从哪个源取回的包，也避免在不知情的情况下换源。源清单集中在脚本顶部的 `DL_SOURCES` 里维护。
 
-1. Gitee 上对应的 EasyTier Release 资产。
-2. 配置的 GitHub 镜像。
-3. GitHub 官方 Release。
+当前内置四个源（按菜单顺序）：
 
-获取最新版本信息时，脚本优先解析 Gitee 的 Release 页面；无法取得版本号时，再尝试 GitHub 镜像 API 和 GitHub 官方 API。下载后会检查 ZIP 完整性；如果获取到 SHA-256 校验文件，也会验证摘要。若 Gitee 上没有校验文件，会提示并跳过独立哈希校验，但仍会执行 ZIP 完整性检查。
+| 序号 | 名称 | 地址 |
+| --- | --- | --- |
+| 1 | Gitee 官方源 | `https://gitee.com/easytier/EasyTier/releases/download/<tag>/easytier-linux-<arch>-<tag>.zip` |
+| 2 | GHFast 镜像 | `https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
+| 3 | GHProxy 镜像 | `https://gh-proxy.com/https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
+| 4 | GitHub 官方源 | `https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
 
-默认镜像前缀为：
+外加两个临时选项：
 
-```text
-https://github.chenc.dev/
+- `c` — 自定义完整 zip 链接（自建镜像、内网包等，需要自己保证架构匹配）。
+- `0` — 取消本次安装/更新，不产生任何配置改动。
+
+四个源都实测能完整下载当前版本的资产并通过 ZIP 完整性校验。**Gitee 在短时间内重复请求时会返回 403**，遇到时重新运行并改选其它源即可。
+
+下载源的选择是**临时**的，不会写入 `/etc/easytier-installer/settings`，每次安装/更新都需要重新选一次。
+
+每个包都会经过：ZIP 完整性检查（`unzip -t`）→ SHA-256 校验（当前官方 Release 未提供 `.sha256` 文件，实测四个源均 404，因此通常跳过并给出提示）→ 解压后的二进制自检（`easytier-core --version`、`easytier-web-embed --help`、`easytier-cli --help`）→ 备份与失败回滚。
+
+### 增删改下载源
+
+编辑 `easytier.sh` 顶部的 `DL_SOURCES`，每行一条，格式为 `id|显示名称|URL模板`：
+
+```sh
+DL_SOURCES='gitee|Gitee 官方源|https://gitee.com/easytier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
+ghfast|GHFast 镜像|https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip'
 ```
 
-镜像前缀需要能够代理脚本拼接出的完整 GitHub URL。也可以在菜单中选择官方源，清除自定义镜像。通用下载镜像通常只代理 Raw 文件或 Release 资产，不保证支持 GitHub API。因此菜单中的连通性测试只下载并校验安装脚本的 Raw 文件，不请求 GitHub API；核心下载仍会按配置的顺序逐源回退。选择官方源时，则测试 GitHub 官方 Raw 地址。
+- `${tag}` 会替换为版本号（如 `v2.6.4`），`${arch}` 替换为架构名（如 `x86_64`）；这两个占位符不能改名。
+- 资产名是 `easytier-linux-<架构>-<版本>.zip`，注意结尾的 `-${tag}`（少写会 404）。
+- 新增源：在字符串里加一行；删除源：删掉对应行；改地址：只改该行的第三段。
+- 菜单序号就是行序，**不需要**同步修改菜单文本、`case` 分支或下载分支。
+
+### 镜像加速（仅用于管理脚本自更新）
+
+菜单 9 的「镜像加速设置」配置的是**管理脚本自身**更新时使用的 GitHub 镜像前缀（默认为 `https://github.chenc.dev/`），与核心二进制的下载源互不影响。
 
 ## 安装脚本自更新
 
@@ -240,7 +264,7 @@ cidr = "10.200.1.0/24"
 
 - **提示缺少下载工具**：安装 `curl` 或 `wget` 后重试。
 - **提示缺少 `unzip`**：手动安装 `unzip`，再运行安装菜单。
-- **下载失败**：在菜单中更换镜像或切换到官方源；确认设备能访问相应站点。
+- **下载失败**：重新运行安装/更新并改选另一个下载源（Gitee 短时间重复请求会返回 403，换成镜像即可）；确认设备能访问相应站点。
 - **菜单直接退出**：确认是在交互式 SSH/终端中运行，并使用“下载到文件再执行”的命令。
 - **本地配置模式无法启动**：检查 `/opt/easytier/data/config.toml` 是否已填写有效配置；基础检查不等于完整 TOML 语法验证。
 - **没有匹配的 Release 资产**：确认设备 CPU 架构、ABI 与 EasyTier 官方发布的二进制相符。
@@ -272,6 +296,16 @@ cidr = "10.200.1.0/24"
 ## 版本说明（v0.5.2）
 
 - 恢复主菜单顶部的安装目录占用显示（`系统：openwrt    架构：aarch64    占用：8.0M`），并在「查看运行状态」的「安装目录」一行同时标出占用大小。此前为省掉每次刷新都执行的 `du` 而移除了该显示，实测 `du -sh /opt/easytier` 在本机几乎不耗时，移除没有必要。
+
+## 版本说明（v0.5.3）
+
+- 安装（菜单 1）与更新核心（菜单 2）改为**先选择下载源**：内置四个源（Gitee 官方源、GHFast 镜像、GHProxy 镜像、GitHub 官方源），也可临时填写自定义完整 zip 链接。选定后只尝试该地址，不再自动多源回退，因此不会在不知情的情况下换源；失败时明确提示"不会自动换源，可重新运行并改选其它源"。
+- 下载源清单集中在脚本顶部的 `DL_SOURCES` 维护，格式 `id|显示名称|URL模板`，占位符为 `${tag}` 与 `${arch}`。增删改源只改这个字符串，无需同步修改菜单文本、`case` 分支或下载分支。
+- 下载源的选择是临时的，**不写入** `settings`；选择 `0` 取消时不会产生任何配置改动（安装时在写盘之前就返回）。
+- 移除原来的 Gitee → 镜像 → GitHub 三源自动回退（`download_with_fallback`），以及随之失去用途的 `asset_url`、`mirror_url`。
+- 实测校正：常见写法中的 `ghproxy.com` 前缀现已失效（返回 HTML 页面但 HTTP 状态码是 200），已替换为实测可用的 `gh-proxy.com`；资产名必须带版本号后缀（`easytier-linux-<架构>-<版本>.zip`）。
+- SHA-256 改为按所选源拼接同源 `.sha256` 地址：官方 Release 未提供该文件（实测四个源均 404），因此通常是跳过哈希校验并给出提示，ZIP 完整性检查与二进制自检照常执行；将来某个源提供校验文件时会被真正校验。
+- 菜单 9 的镜像设置改名为「镜像加速设置（管理脚本自更新用）」：它只影响管理脚本自身的更新与连通性测试，不参与核心二进制下载。
 
 ## 版本说明（v0.5.1）
 

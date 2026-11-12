@@ -13,7 +13,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.5.2"
+SCRIPT_VERSION="0.5.3"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -32,6 +32,28 @@ DEFAULT_USER="easytier"
 DEFAULT_MODE="config-file"
 DEFAULT_REMOTE_URL=""
 DEFAULT_MIRROR="https://github.chenc.dev/"
+# ---------- binary download sources ----------
+# One source per line: id|display name|URL template.
+# Placeholders: ${tag} = release tag (e.g. v2.6.4), ${arch} = architecture name.
+# This list is the single place to add, remove or repair a source: the selection
+# menu and the downloader both read it, so no menu text or case branch has to be
+# kept in sync. POSIX sh has no arrays, so it is a newline-separated string that
+# is read with awk rather than expanded as ${list[@]}.
+# Note the trailing "-${tag}" in the asset name: the official asset is
+# easytier-linux-<arch>-<tag>.zip, not easytier-linux-<arch>.zip.
+# Every URL below was checked on-device by reading the first four bytes of the
+# response: a working source answers with the ZIP magic 50 4b 03 04. The widely
+# copied https://ghproxy.com/ prefix was dropped because it now returns an HTML
+# page with HTTP 200, which only the ZIP integrity check would catch.
+DL_SOURCES='gitee|Gitee 官方源|https://gitee.com/easytier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
+ghfast|GHFast 镜像|https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
+ghproxy|GHProxy 镜像|https://gh-proxy.com/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
+github|GitHub 官方源|https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip'
+# Filled by render_dl_source_menu for the current install or update only. The
+# choice is intentionally never written to settings: every run re-confirms the
+# source instead of silently reusing a mirror that has since gone away.
+DL_SEL_TYPE=""
+DL_SEL_URL=""
 # OpenWrt LAN forwarding: the tunnel device EasyTier creates by default and the
 # name of the firewall zone this script owns when it has to create one.
 DEFAULT_TUN_DEV="tun0"
@@ -325,53 +347,77 @@ latest_version() {
   [ -n "$v" ] || return 1
   printf '%s' "$v"
 }
-asset_url() {
-  # Asset pattern used by the official EasyTier release installer.
-  arch="$1"; ver="$2"
-  printf 'https://github.com/%s/releases/download/%s/easytier-linux-%s-%s.zip' "$REPO" "$ver" "$arch" "$ver"
+# ---------- download source selection ----------
+# Fill a source template. sed does the substitution because ${var//pat/repl} is
+# a bashism that BusyBox ash rejects. Only the two documented placeholders are
+# replaced; everything else is copied through verbatim.
+dl_render_template() {
+  printf '%s' "$1" | sed "s|\${tag}|$2|g; s|\${arch}|$3|g"
 }
-mirror_url() {
-  original="$1"
-  if [ -n "${MIRROR:-}" ]; then printf '%s/%s' "${MIRROR%/}" "$original"
-  else printf '%s' "$original"
-  fi
+# awk reads the list instead of a `while read` loop: the read() wrapper above
+# prefers /dev/tty, so a here-document loop would read the terminal instead of
+# the list whenever the script runs on a real terminal.
+dl_source_count() {
+  printf '%s\n' "$DL_SOURCES" | awk -F'|' 'NF >= 3 {n++} END {printf "%d", n+0}'
 }
-download_with_fallback() {
-  original="$1"; output="$2"
-  rm -f "$output"
-  # Try the Gitee EasyTier release mirror first.
-  case "$original" in
-    https://github.com/EasyTier/EasyTier/releases/download/*)
-      gitee_url="$(printf '%s' "$original" | sed 's#^https://github.com/EasyTier/EasyTier/releases/download/#https://gitee.com/easytier/EasyTier/releases/download/#')"
-      info "优先尝试 Gitee Release 源：$gitee_url"
-      if download_file "$gitee_url" "$output" && [ -s "$output" ] && unzip -t "$output" >/dev/null 2>&1; then return 0; fi
-      warn "Gitee Release 下载失败或 ZIP 无效，尝试配置的 GitHub 镜像。"
-      rm -f "$output"
-      ;;
-  esac
-  if [ -n "${MIRROR:-}" ]; then
-    u="$(mirror_url "$original")"
-    info "尝试配置的 GitHub 镜像源：$u"
-    if download_file "$u" "$output" && [ -s "$output" ] && unzip -t "$output" >/dev/null 2>&1; then return 0; fi
-    warn "配置的镜像下载失败或 ZIP 无效，回退 GitHub 官方源。"
-    rm -f "$output"
-  fi
-  info "尝试 GitHub 官方源：$original"
-  if download_file "$original" "$output" && [ -s "$output" ] && unzip -t "$output" >/dev/null 2>&1; then return 0; fi
-  rm -f "$output"
-  warn "GitHub 官方源下载失败或 ZIP 无效。"
-  return 1
+dl_source_name() {
+  printf '%s\n' "$DL_SOURCES" | awk -F'|' -v k="$1" 'NF >= 3 {n++; if (n == k) {print $2; exit}}'
+}
+dl_source_template() {
+  printf '%s\n' "$DL_SOURCES" | awk -F'|' -v k="$1" 'NF >= 3 {n++; if (n == k) {print $3; exit}}'
+}
+render_dl_source_menu() {
+  # Shared by install and update. The result lives only in DL_SEL_TYPE and
+  # DL_SEL_URL for this run. Returns 1 when the user cancels, so the caller can
+  # abort without having touched anything on disk.
+  DL_SEL_TYPE=""
+  DL_SEL_URL=""
+  src_total="$(dl_source_count)"
+  while :; do
+    say ""
+    say "${C_BOLD}${C_CYAN}-------------- 选择下载源 --------------${C_RESET}"
+    printf '%s\n' "$DL_SOURCES" | awk -F'|' 'NF >= 3 {printf "%d. %s\n", ++n, $2}'
+    say "c. 自定义完整 zip 链接（自建源或内网包）"
+    say "0. 取消本次操作"
+    say "${C_CYAN}----------------------------------------${C_RESET}"
+    printf '请选择 [1-%s/c/0，默认 0]：' "$src_total"
+    if ! read -r ans; then warn "读取输入失败。"; return 1; fi
+    case "$ans" in
+      0|"") info "已取消。"; return 1 ;;
+      c|C)
+        say "请给出 easytier-linux-<架构>-<版本>.zip 的完整下载地址。"
+        printf '地址：'; read -r custom_url || custom_url=""
+        case "$custom_url" in
+          http://*|https://*) ;;
+          *) warn "地址必须以 http:// 或 https:// 开头。"; continue ;;
+        esac
+        DL_SEL_TYPE="custom"
+        DL_SEL_URL="$custom_url"
+        return 0
+        ;;
+    esac
+    case "$ans" in *[!0-9]*) warn "无效选项：$ans。"; continue ;; esac
+    if [ "$ans" -lt 1 ] || [ "$ans" -gt "$src_total" ]; then
+      warn "序号超出范围：$ans。"; continue
+    fi
+    DL_SEL_TYPE="preset"
+    DL_SEL_URL="$(dl_source_template "$ans")"
+    [ -n "$DL_SEL_URL" ] || { warn "读取下载源失败。"; continue; }
+    info "已选择下载源：$(dl_source_name "$ans")"
+    return 0
+  done
 }
 check_checksum_if_available() {
-  # Check the matching Gitee checksum once only. A missing checksum must not
-  # trigger the full asset-source fallback chain after the ZIP already downloaded.
-  zipfile="$1"; ver="$2"; arch="$3"
-  sum_url="https://gitee.com/easytier/EasyTier/releases/download/$ver/easytier-linux-$arch-$ver.zip.sha256"
+  # Verify against the .sha256 sidecar that belongs to the same source URL the
+  # ZIP came from. A source without a sidecar must not fail the install: the ZIP
+  # integrity check already ran, so an unverified package is still better than
+  # a source that cannot be used at all.
+  zipfile="$1"; sum_url="$2"
   sumfile="$TMPDIR_ET/checksum"
   rm -f "$sumfile"
   if ! download_file "$sum_url" "$sumfile" >/dev/null 2>&1 || [ ! -s "$sumfile" ]; then
     rm -f "$sumfile"
-    warn "Gitee 未提供独立 SHA-256 文件，跳过哈希校验；继续进行 ZIP 完整性检查。"
+    warn "所选下载源未提供独立 SHA-256 文件，跳过哈希校验；ZIP 完整性检查已通过。"
     return 0
   fi
   expected="$(awk 'NR==1 {print $1}' "$sumfile" | tr 'A-F' 'a-f')"
@@ -389,14 +435,34 @@ check_checksum_if_available() {
 }
 
 get_asset_and_extract() {
+  sel_type="${1:-}"
+  sel_ref="${2:-}"
+  case "$sel_type" in
+    preset|custom) ;;
+    *) die "内部错误：没有传入下载源。" ;;
+  esac
   arch="$(detect_arch)"
   case "$arch" in
     x86_64|aarch64|armv7|armv6|i686|mipsel|mips|mips64el|riscv64) ;;
     *) die "暂未识别架构：$arch。不会下载不匹配的二进制。可在 EasyTier 官方 Release 确认支持情况后扩展映射。" ;;
   esac
   info "检测到架构：$arch"
-  [ "$VERSION" != latest ] || VERSION="$(latest_version)" || die "无法获取最新版本号。请检查 Gitee latest Release 页面是否可访问，或在下载源设置中配置可用镜像。"
-  info "准备下载 EasyTier 版本：$VERSION"
+  if [ "$sel_type" = custom ]; then
+    # A hand-supplied URL is used exactly as given: no version lookup and no
+    # placeholder substitution, so a private mirror can serve any build.
+    url="$sel_ref"
+    sum_url="${url}.sha256"
+    info "使用自定义地址：$url"
+  else
+    [ "$VERSION" != latest ] || VERSION="$(latest_version)" || die "无法获取最新版本号。请检查网络连通性，或在下载源中选择自定义地址。"
+    info "准备下载 EasyTier 版本：$VERSION"
+    url="$(dl_render_template "$sel_ref" "$VERSION" "$arch")"
+    # Official releases publish no .sha256 sidecar today (verified 404 on
+    # GitHub, Gitee and every mirror), so this normally degrades to the ZIP
+    # integrity check plus the --version smoke test further down. It stays
+    # wired to the selected source so a source that does ship one gets verified.
+    sum_url="${url}.sha256"
+  fi
   if have mktemp; then
     TMPDIR_ET="$(mktemp -d "${TMPDIR:-/tmp}/easytier-install.XXXXXX")" || die "无法创建临时目录；可设置 TMPDIR 指向有足够空间的可写目录。"
   else
@@ -404,10 +470,14 @@ get_asset_and_extract() {
     (umask 077 && mkdir "$TMPDIR_ET") 2>/dev/null || die "无法创建临时目录；可设置 TMPDIR 指向有足够空间的可写目录。"
   fi
   zip="$TMPDIR_ET/easytier.zip"
-  url="$(asset_url "$arch" "$VERSION")"
-  download_with_fallback "$url" "$zip" || die "下载失败：$url"
+  # Only the selected source is tried. Falling through to another host would
+  # hide which mirror actually served the package, and could silently install a
+  # build from a source the user never chose.
+  info "下载地址：$url"
+  download_file "$url" "$zip" || die "下载失败：$url（本次只尝试所选下载源，不会自动换源；可重新运行并改选其它源）"
+  [ -s "$zip" ] || die "下载得到的文件为空：$url"
   unzip -t "$zip" >/dev/null 2>&1 || die "ZIP 文件校验失败，拒绝安装。"
-  check_checksum_if_available "$zip" "$VERSION" "$arch" || die "SHA-256 不匹配，拒绝安装。"
+  check_checksum_if_available "$zip" "$sum_url" || die "SHA-256 不匹配，拒绝安装。"
   mkdir_p "$TMPDIR_ET/unpack"
   unzip -oq "$zip" -d "$TMPDIR_ET/unpack" || die "解压失败。"
   # Official release ZIP normally contains easytier-linux-ARCH/easytier-core and easytier-web-embed.
@@ -1269,8 +1339,11 @@ install_all() {
     WEB_PORT="0"
     CONFIG_PORT="0"
   fi
+  # Ask for the package source before anything is written to disk, so cancelling
+  # here leaves the previous installation completely untouched.
+  render_dl_source_menu || { info "已取消安装。"; return 1; }
   save_settings
-  get_asset_and_extract
+  get_asset_and_extract "$DL_SEL_TYPE" "$DL_SEL_URL"
   make_config
   install_ok=yes
   if [ "$RUN_MODE" = "config-file" ]; then
@@ -1435,9 +1508,11 @@ edit_ports() {
 download_settings() {
   need_root
   load_settings
-  say "当前通用镜像前缀：$MIRROR"
-  say "下载顺序为 Gitee Release → 配置的通用 GitHub 镜像 → GitHub 官方源。通用镜像用于代理完整 GitHub URL，例如 https://ghfast.top/。输入 official 清空。"
-  printf '输入新的通用镜像前缀（回车保持，输入 official 清空）：'; read -r x || x=""
+  say "当前镜像前缀：$MIRROR"
+  say "这里配置的镜像只用于管理脚本自身的更新与连通性测试，不参与核心二进制的下载。"
+  say "核心与组件在安装（菜单 1）和更新（菜单 2）时单独选择下载源。"
+  say "镜像用于代理完整 GitHub URL，例如 https://ghfast.top/。输入 official 清空。"
+  printf '输入新的镜像前缀（回车保持，输入 official 清空）：'; read -r x || x=""
   if [ "$x" = official ]; then MIRROR=""
   elif [ -n "$x" ]; then MIRROR="${x%/}/"; fi
   save_settings
@@ -1582,10 +1657,12 @@ update_all() {
   load_settings
   [ -x "$CORE" ] || die "尚未安装 EasyTier 核心，请先选择菜单 1 安装。"
   ensure_tools
+  render_dl_source_menu || { info "已取消更新。"; return 0; }
   was_active=no
   service_is_active && was_active=yes
-  VERSION="latest"
-  get_asset_and_extract
+  # A custom URL has no version to look up, so the recorded version is kept.
+  [ "$DL_SEL_TYPE" = custom ] || VERSION="latest"
+  get_asset_and_extract "$DL_SEL_TYPE" "$DL_SEL_URL"
   write_runtime_env
   write_runner
   if [ "$was_active" = yes ]; then
@@ -1786,12 +1863,12 @@ config_menu() {
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     say "运行模式：$(mode_label "$RUN_MODE")"
     say "配置文件：$DATA/config.toml"
-    say "下载源镜像：${MIRROR:-未设置（仅 Gitee 与 GitHub 官方源）}"
+    say "镜像加速：${MIRROR:-未设置}（仅用于管理脚本自更新）"
     say "管理脚本：v$SCRIPT_VERSION"
     say "${C_CYAN}----------------------------------------------${C_RESET}"
     say "1. 编辑本地 TOML 配置文件"
     say "2. 设置远程 Web 配置服务器"
-    say "3. 下载源 / 镜像加速设置"
+    say "3. 镜像加速设置（管理脚本自更新用）"
     say "4. 更新管理脚本（从作者仓库）"
     say "0. 返回主菜单"
     say "=============================================="
@@ -1821,7 +1898,7 @@ menu() {
     say "${C_BOLD}${C_CYAN}==============================================${C_RESET}"
     menu_status
     say "系统：$(detect_os)    架构：$(detect_arch)    占用：$(easytier_dir_size)"
-    say "下载源镜像：${MIRROR:-未设置（仅 Gitee 与 GitHub 官方源）}"
+    say "下载源：安装/更新时选择（共 $(dl_source_count) 个）"
     say "${C_CYAN}----------------------------------------------${C_RESET}"
     say "1. 安装 EasyTier（选择本地 Web / 本地配置 / 远程 Web）"
     say "2. 更新 EasyTier 核心/组件"
@@ -1831,7 +1908,7 @@ menu() {
     say "6. 查看运行状态"
     say "7. 查看日志"
     say "8. 修改运行参数（端口 / Web API 地址 / 局域网转发）"
-    say "9. 更多配置（编辑 TOML / 远程 Web / 下载源 / 更新管理脚本）"
+    say "9. 更多配置（编辑 TOML / 远程 Web / 镜像加速 / 更新管理脚本）"
     say "10. 卸载 EasyTier（可保留 et 管理脚本）"
     say "0. 退出"
     say "=============================================="
@@ -1914,7 +1991,7 @@ EasyTier 跨平台安装管理工具
   sh easytier.sh          进入交互菜单
   sh easytier.sh --help   显示帮助
 
-安装时需要 root 权限。核心组件下载顺序：Gitee Release、配置的 GitHub 镜像、GitHub 官方 Release。
+安装时需要 root 权限。安装与更新核心时会先选择下载源（源清单在脚本顶部集中维护，也可临时填写自定义完整地址）；选定后只尝试该地址，不会自动切换到其它源。
 管理命令：安装后可直接运行 et。
 脚本自更新：从菜单选择“更新安装脚本”，更新固定路径中的管理脚本。
 首次安装默认选择轻量的“核心 + 本地 TOML 配置”模式；需要 Web 页面时可选择本地 Web 模式。仅本地 Web 模式会安装 easytier-web-embed。
