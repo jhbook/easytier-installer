@@ -56,7 +56,7 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 - 管理服务启动、停止、重启、状态和日志。
 - 编辑本地 TOML 配置、设置远程 Web 配置服务器。
 - 修改运行参数：节点端口、Web/API 端口、配置服务端口、Web API 地址、局域网转发开关。
-- 安装和更新核心时先选择下载源（Gitee / 两个 GitHub 镜像 / GitHub 官方源，或临时填写自定义地址），选定后只尝试该地址。
+- 安装和更新核心时先选择下载源（Gitee / 三个 GitHub 镜像 / GitHub 官方源，或临时填写自定义地址），选定后只尝试该地址。
 - 从指定 GitHub 仓库更新本管理脚本，替换前检查脚本身份和 Shell 语法。
 - 在 OpenWrt / ImmortalWrt（fw4 防火墙）上安装时可顺便开启局域网转发与 NAT，让局域网设备访问 EasyTier 网络。
 - 运行状态可直接看到已连接节点、延迟与丢包，以及本机公布的路由与代理网段。
@@ -132,25 +132,26 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 
 安装（菜单 1）与更新（菜单 2）都会先让你**选择一个下载源**，选定后只从该地址下载，**不会自动切换到其它源** —— 这样能明确这次装的是从哪个源取回的包，也避免在不知情的情况下换源。源清单集中在脚本顶部的 `DL_SOURCES` 里维护。
 
-当前内置四个源（按菜单顺序）：
+当前内置五个源（按菜单顺序）：
 
 | 序号 | 名称 | 地址 |
 | --- | --- | --- |
 | 1 | Gitee 官方源 | `https://gitee.com/easytier/EasyTier/releases/download/<tag>/easytier-linux-<arch>-<tag>.zip` |
-| 2 | GHFast 镜像 | `https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
-| 3 | GHProxy 镜像 | `https://gh-proxy.com/https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
-| 4 | GitHub 官方源 | `https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
+| 2 | jhbook 镜像 | `https://git.jhbook.eu.org/https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
+| 3 | GHFast 镜像 | `https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
+| 4 | GHProxy 镜像 | `https://gh-proxy.com/https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
+| 5 | GitHub 官方源 | `https://github.com/EasyTier/EasyTier/releases/download/<tag>/...` |
 
 外加两个临时选项：
 
 - `c` — 自定义完整 zip 链接（自建镜像、内网包等，需要自己保证架构匹配）。
 - `0` — 取消本次安装/更新，不产生任何配置改动。
 
-四个源都实测能完整下载当前版本的资产并通过 ZIP 完整性校验。**Gitee 在短时间内重复请求时会返回 403**，遇到时重新运行并改选其它源即可。
+五个源都实测能完整下载当前版本的资产并通过 ZIP 完整性校验。**Gitee 在短时间内重复请求时会返回 403**，遇到时重新运行并改选其它源即可。
 
 下载源的选择是**临时**的，不会写入 `/etc/easytier-installer/settings`，每次安装/更新都需要重新选一次。
 
-每个包都会经过：ZIP 完整性检查（`unzip -t`）→ SHA-256 校验（当前官方 Release 未提供 `.sha256` 文件，实测四个源均 404，因此通常跳过并给出提示）→ 解压后的二进制自检（`easytier-core --version`、`easytier-web-embed --help`、`easytier-cli --help`）→ 备份与失败回滚。
+每个包都会经过：ZIP 完整性检查（`unzip -t`）→ SHA-256 校验（当前官方 Release 未提供 `.sha256` 文件，实测五个源均 404，因此通常跳过并给出提示）→ 解压后的二进制自检（`easytier-core --version`、`easytier-web-embed --help`、`easytier-cli --help`）→ 备份与失败回滚。
 
 ### 增删改下载源
 
@@ -158,13 +159,29 @@ curl -fsSL "https://raw.githubusercontent.com/jhbook/easytier-installer/refs/hea
 
 ```sh
 DL_SOURCES='gitee|Gitee 官方源|https://gitee.com/easytier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
-ghfast|GHFast 镜像|https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip'
+jhbook|jhbook 镜像|https://git.jhbook.eu.org/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
+ghfast|GHFast 镜像|https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
+ghproxy|GHProxy 镜像|https://gh-proxy.com/https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip
+github|GitHub 官方源|https://github.com/EasyTier/EasyTier/releases/download/${tag}/easytier-linux-${arch}-${tag}.zip'
 ```
 
 - `${tag}` 会替换为版本号（如 `v2.6.4`），`${arch}` 替换为架构名（如 `x86_64`）；这两个占位符不能改名。
 - 资产名是 `easytier-linux-<架构>-<版本>.zip`，注意结尾的 `-${tag}`（少写会 404）。
 - 新增源：在字符串里加一行；删除源：删掉对应行；改地址：只改该行的第三段。
 - 菜单序号就是行序，**不需要**同步修改菜单文本、`case` 分支或下载分支。
+
+### 版本号从哪来
+
+`settings` 里的 `VERSION` 记录上次装到的版本，普通安装直接复用它；只有它是 `latest`（首次安装，以及每次更新）时才会去查一次当前最新版本。查询只读标签、**不下载任何包内容**，按下面顺序尝试，命中即停：
+
+1. 你本次所选下载源自己的 `releases/latest` 重定向（例如 `https://ghfast.top/https://github.com/EasyTier/EasyTier/releases/latest`）；
+2. Gitee 官方 API（国内通常 1 秒内返回）；
+3. GitHub API：先经菜单 9 配置的镜像，再直连（共享出口 IP 被限流时直连返回 403 属正常）；
+4. GitHub 官方 `releases/latest` 重定向兜底。
+
+每一步都有 6 秒连接 / 15 秒总时长上限，全部失败会明确报错并提示改选自定义地址。
+
+> v0.5.3 及更早用的是另一条路径：跟随 Gitee 的 `releases/latest`。Gitee 后来把这个地址重定向到一个 24MB 的归档 zip，而 `curl -o /dev/null` 会把重定向目标整个下载下来只为读最终 URL —— 实测白白花掉约 7 秒后解析仍然失败，最坏情况三级超时叠加接近 75 秒。这就是「选完源之后卡很久」的原因，v0.5.4 起已改掉。
 
 ### 镜像加速（仅用于管理脚本自更新）
 
@@ -292,6 +309,14 @@ cidr = "10.200.1.0/24"
 3. GitHub 官方 Raw：`https://raw.githubusercontent.com/jhbook/easytier-installer/main/easytier.sh`。
 
 前一个来源下载失败或校验不通过时才会继续尝试下一个来源。下载地址不追加时间戳查询参数，以兼容不支持额外查询参数的镜像/CDN；脚本通过校验下载内容来判断是否可用。
+
+## 版本说明（v0.5.4）
+
+- 修复「选完下载源之后卡很久」：`latest_version` 不再跟随 Gitee 的 `releases/latest`（该地址已变成重定向到一个 24MB 归档 zip，`curl -o /dev/null` 会把整包下载后丢弃，实测约 7 秒且最终解析仍然失败），改为四级快速查询：①本次所选源自己的 `releases/latest`；②Gitee API；③GitHub API（先镜像、后直连）；④GitHub 官方重定向兜底。
+- 实测对比（iStoreOS 25.12.5 / x86_64）：旧实现 14 秒且失败；新实现逐个源探测均为 1–2 秒并正确得到 `v2.6.4`，所选源不可达时 0 秒降级到 API，不会长时间卡住。
+- 探测只发 HEAD 请求读取重定向目标，不再下载任何页面正文；每步限制 6 秒连接 / 15 秒总时长。
+- 版本查询新增长度可预期的提示「正在获取最新版本号（只查询标签，不下载内容）...」，卡顿时能看出正在进行哪一步。
+- 下载源列表加入 jhbook 镜像（`https://git.jhbook.eu.org/`，代理 GitHub release 资产），内置源增至五个，菜单序号与 README 表格同步更新。
 
 ## 版本说明（v0.5.2）
 

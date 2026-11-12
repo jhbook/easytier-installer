@@ -13,7 +13,7 @@ REPO="EasyTier/EasyTier"
 SCRIPT_REPO="jhbook/easytier-installer"
 SCRIPT_BRANCH="main"
 SCRIPT_PATH="easytier.sh"
-SCRIPT_VERSION="0.5.3"
+SCRIPT_VERSION="0.5.4"
 BASE="/opt/easytier"
 BIN="$BASE/bin"
 DATA="$BASE/data"
@@ -297,54 +297,61 @@ ensure_tools() {
   fi
   have unzip || die "需要 unzip 才能解压官方 ZIP。请手动安装 unzip 后重试。"
 }
+# Pull a release tag out of a GitHub/Gitee JSON body without needing jq.
+json_tag() {
+  sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+}
+# Rewrite a rendered or template source URL into its releases/latest form. Every
+# configured source (mirrors included) has the /releases/download/<tag>/<asset>
+# shape, so replacing that middle segment gives a cheap "what is newest" probe
+# against the very source the user picked. [^/]* matches both an already-rendered
+# tag (v2.6.4) and a literal ${tag} placeholder.
+dl_latest_url() {
+  printf '%s' "$1" | sed 's|/releases/download/[^/]*/.*|/releases/latest|'
+}
+# Read the tag out of a followed redirect. HEAD only, so no page body is fetched.
+redirect_tag() {
+  case "$DL_TOOL" in
+    curl) curl -sI -o /dev/null -w '%{url_effective}' -L --connect-timeout 6 --max-time 15 "$1" 2>/dev/null ;;
+    wget) wget -S -qO /dev/null -T 15 -t 1 "$1" 2>&1 | sed -n 's|.*Location: ||p' | tail -n 1 ;;
+    *) return 1 ;;
+  esac | sed -n 's|.*/releases/tag/||p' | sed 's|[/?].*||'
+}
 latest_version() {
-  # Prefer Gitee's latest-release redirect; it resolves to /releases/tag/<version>.
-  # Example: https://gitee.com/easytier/EasyTier/releases/latest -> .../releases/tag/v2.6.4
+  # Resolving the newest tag is metadata, not a package transfer, and the user is
+  # staring at a prompt while it runs, so it has to stay quick.
+  #
+  # The old first step is gone: following
+  # https://gitee.com/easytier/EasyTier/releases/latest with "curl -o /dev/null"
+  # downloaded whatever that redirect pointed at. It now 302s to a blazearchive
+  # ZIP, so curl pulled megabytes just to read the final URL (measured ~7s on a
+  # router) and the parse still failed; the Gitee HTML scrape that followed it
+  # then wasted a second request for the same reason.
   v=""
-  latest_url="https://gitee.com/easytier/EasyTier/releases/latest"
-  if [ "$DL_TOOL" = curl ]; then
-    final_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' --connect-timeout 8 --max-time 25 "$latest_url" 2>/dev/null || :)"
-    case "$final_url" in
-      https://gitee.com/easytier/EasyTier/releases/tag/*)
-        v="${final_url##*/}"
-        v="${v%%\?*}"
-        v="${v%%\#*}"
-        ;;
-    esac
+  # 1) Ask the source the user actually picked, so the tag and the package come
+  #    from the same place. Mirrors proxy the releases/latest redirect (verified
+  #    on ghfast, gh-proxy and jhbook).
+  if [ -n "${DL_SEL_URL:-}" ]; then
+    lu="$(dl_latest_url "$DL_SEL_URL")"
+    [ "$lu" != "$DL_SEL_URL" ] && v="$(redirect_tag "$lu")"
   fi
-  # wget follows redirects but does not expose the final URL consistently; parse the
-  # canonical release URL from a temporary file. Do not put the whole HTML response
-  # in command substitution: unexpected NUL bytes in a response trigger shell warnings.
-  if [ -z "$v" ]; then
-    page_file="$(mktemp "${TMPDIR:-/tmp}/easytier-gitee-latest.XXXXXX" 2>/dev/null || :)"
-    [ -n "$page_file" ] || page_file="${TMPDIR:-/tmp}/easytier-gitee-latest.$$"
-    rm -f "$page_file"
-    case "$DL_TOOL" in
-      curl) curl -fsSL --connect-timeout 8 --max-time 25 "$latest_url" -o "$page_file" 2>/dev/null || : ;;
-      wget) wget -T 10 -t 1 -qO "$page_file" "$latest_url" 2>/dev/null || : ;;
-    esac
-    if [ -s "$page_file" ]; then
-      v="$(grep -aoE 'https://gitee\.com/easytier/EasyTier/releases/tag/[vV]?[0-9][A-Za-z0-9._-]*' "$page_file" 2>/dev/null | head -n 1 | sed 's#.*/##')"
-    fi
-    rm -f "$page_file"
+  # 2) Gitee's API answers in well under a second from inside China.
+  [ -n "$v" ] || v="$(fetch_text "https://gitee.com/api/v5/repos/easytier/EasyTier/releases/latest" | json_tag)"
+  # 3) GitHub API: through the configured mirror first, then directly. GitHub
+  #    rate-limits shared addresses, so a 403 on the direct call is normal.
+  if [ -z "$v" ] && [ -n "${MIRROR:-}" ]; then
+    v="$(fetch_text "${MIRROR%/}/https://api.github.com/repos/$REPO/releases/latest" | json_tag)"
   fi
+  [ -n "$v" ] || v="$(fetch_text "https://api.github.com/repos/$REPO/releases/latest" | json_tag)"
+  # 4) Last resort: the official releases/latest redirect.
+  [ -n "$v" ] || v="$(redirect_tag "https://github.com/$REPO/releases/latest")"
   # Validate the result before using it in asset URLs.
   case "$v" in
     v[0-9]*|[0-9]*)
-      case "$v" in *[!A-Za-z0-9._+-]*) v="";; esac
+      case "$v" in *[!A-Za-z0-9._+-]*) v="" ;; esac
       ;;
     *) v="" ;;
   esac
-  [ -n "$v" ] || {
-    # If Gitee's latest redirect is unavailable, try GitHub's API through the
-    # configured mirror, then the official API.
-    api="https://api.github.com/repos/$REPO/releases/latest"
-    if [ -n "${MIRROR:-}" ]; then
-      mirror_api="${MIRROR%/}/https://api.github.com/repos/$REPO/releases/latest"
-      v="$(fetch_text "$mirror_api" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-    fi
-    [ -n "$v" ] || v="$(fetch_text "$api" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-  }
   [ -n "$v" ] || return 1
   printf '%s' "$v"
 }
@@ -455,7 +462,10 @@ get_asset_and_extract() {
     sum_url="${url}.sha256"
     info "使用自定义地址：$url"
   else
-    [ "$VERSION" != latest ] || VERSION="$(latest_version)" || die "无法获取最新版本号。请检查网络连通性，或在下载源中选择自定义地址。"
+    if [ "$VERSION" = latest ]; then
+      info "正在获取最新版本号（只查询标签，不下载内容）..."
+      VERSION="$(latest_version)" || die "无法获取最新版本号。请检查网络连通性，或在下载源中选择自定义地址。"
+    fi
     info "准备下载 EasyTier 版本：$VERSION"
     url="$(dl_render_template "$sel_ref" "$VERSION" "$arch")"
     # Official releases publish no .sha256 sidecar today (verified 404 on
